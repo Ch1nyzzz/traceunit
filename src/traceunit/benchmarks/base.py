@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from traceunit.models import BenchmarkEvaluation
+from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
 class BenchmarkAdapter(ABC):
@@ -12,9 +12,18 @@ class BenchmarkAdapter(ABC):
     def preflight(self) -> None:
         """Fail before expensive evaluation when runtime prerequisites are absent."""
 
+    def bind_plan(self, plan: BenchmarkPlan) -> None:
+        """Bind an already-frozen benchmark plan without reopening source data."""
+
+        if plan.benchmark != self.name:
+            raise ValueError(
+                f"benchmark plan is for {plan.benchmark!r}, not {self.name!r}"
+            )
+        self._plan = plan
+
     @abstractmethod
-    def prepare(self, work_dir: Path) -> None:
-        """Prepare immutable task pools and validate runtime assets."""
+    def prepare(self, work_dir: Path) -> BenchmarkPlan:
+        """Freeze disjoint search/calibration/final pools and return their plan."""
 
     @abstractmethod
     def seed_source(self) -> Path:
@@ -30,11 +39,10 @@ class BenchmarkAdapter(ABC):
         *,
         source: Path,
         candidate_id: str,
-        split: str,
+        pool: PoolSliceRef,
         out_dir: Path,
-        limit_override: int | None = None,
     ) -> BenchmarkEvaluation:
-        """Run a natural-task pool and normalize the full trajectory artifacts."""
+        """Evaluate one immutable, content-bound pool slice."""
 
     @abstractmethod
     def smoke_test(self, source: Path, out_dir: Path) -> tuple[bool, str]:

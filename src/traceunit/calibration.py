@@ -1,248 +1,482 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Collection, Iterable, Mapping
 
-from traceunit.io import read_json, write_json
-from traceunit.models import DecisionRecord, EvidenceRecord
+from traceunit.io import append_jsonl, read_jsonl
 
 
-@dataclass
-class CalibrationBin:
-    count: int = 0
-    audit_positive: int = 0
-    audit_noninferior: int = 0
-    promotion_correct: int = 0
+class CalibrationLabel(StrEnum):
+    """Outcome of a paired natural-task calibration measurement."""
+
+    POSITIVE = "positive"
+    NONINFERIOR = "noninferior"
+    NEGATIVE = "negative"
+    INCONCLUSIVE = "inconclusive"
+
+
+class TransferBand(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class UncertaintyBand(StrEnum):
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class CalibrationStatus(StrEnum):
+    SUPPORTED = "supported"
+    UNCERTAIN = "uncertain"
+    CHALLENGED = "challenged"
+
+
+class CalibrationTrigger(StrEnum):
+    UNSEEN_FAMILY = "unseen_family"
+    HIGH_UNCERTAINTY = "high_uncertainty"
+    UNIT_SEARCH_DISAGREEMENT = "unit_search_disagreement"
+    NOVEL_COMPOSITION = "novel_composition"
+
+
+def classify_calibration_label(
+    paired_delta: float,
+    uncertainty: float,
+    *,
+    noninferiority_margin: float,
+    positive_effect: float = 0.0,
+) -> CalibrationLabel:
+    """Classify an estimate and symmetric uncertainty radius into four states.
+
+    uncertainty is a confidence radius supplied by the benchmark adapter, not
+    a standard error interpreted by this module. The caller therefore controls
+    the statistical coverage used by this deterministic classification rule.
+    """
+
+    _require_finite("paired_delta", paired_delta)
+    _require_nonnegative_finite("uncertainty", uncertainty)
+    _require_nonnegative_finite("noninferiority_margin", noninferiority_margin)
+    _require_nonnegative_finite("positive_effect", positive_effect)
+
+    lower = paired_delta - uncertainty
+    upper = paired_delta + uncertainty
+    if lower > positive_effect:
+        return CalibrationLabel.POSITIVE
+    if upper < -noninferiority_margin:
+        return CalibrationLabel.NEGATIVE
+    if lower >= -noninferiority_margin:
+        return CalibrationLabel.NONINFERIOR
+    return CalibrationLabel.INCONCLUSIVE
+
+
+@dataclass(frozen=True)
+class CalibrationObservation:
+    """Private, append-only natural-transfer evidence for one candidate pair."""
+
+    candidate_id: str
+    parent_id: str
+    lineage_id: str
+    epoch: int
+    shard_id: str
+    stratum: str
+    family_keys: tuple[str, ...]
+    unit_profile: str
+    paired_delta: float
+    uncertainty: float
+    label: CalibrationLabel
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "candidate_id",
+            "parent_id",
+            "lineage_id",
+            "shard_id",
+            "stratum",
+            "unit_profile",
+        ):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"{field_name} must not be empty")
+        if self.epoch < 1:
+            raise ValueError("epoch must be at least 1")
+        _require_finite("paired_delta", self.paired_delta)
+        _require_nonnegative_finite("uncertainty", self.uncertainty)
+
+        families = tuple(
+            sorted({key.strip() for key in self.family_keys if key.strip()})
+        )
+        if not families:
+            raise ValueError("family_keys must contain at least one non-empty key")
+        object.__setattr__(self, "family_keys", families)
+        object.__setattr__(self, "label", CalibrationLabel(self.label))
+
+    @property
+    def identity(self) -> tuple[str, str, int, str, str]:
+        """Stable identity used to reject accidental duplicate appends."""
+
+        return (
+            self.candidate_id,
+            self.parent_id,
+            self.epoch,
+            self.shard_id,
+            self.stratum,
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        # Beta(1,1) smoothing avoids an unjustified 0/1 estimate early on.
+        value = asdict(self)
+        value["family_keys"] = list(self.family_keys)
+        value["label"] = self.label.value
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "CalibrationObservation":
+        return cls(
+            candidate_id=str(value["candidate_id"]),
+            parent_id=str(value["parent_id"]),
+            lineage_id=str(value["lineage_id"]),
+            epoch=int(value["epoch"]),
+            shard_id=str(value["shard_id"]),
+            stratum=str(value["stratum"]),
+            family_keys=tuple(str(key) for key in value["family_keys"]),
+            unit_profile=str(value["unit_profile"]),
+            paired_delta=float(value["paired_delta"]),
+            uncertainty=float(value["uncertainty"]),
+            label=CalibrationLabel(str(value["label"])),
+        )
+
+    @classmethod
+    def from_measurement(
+        cls,
+        *,
+        candidate_id: str,
+        parent_id: str,
+        lineage_id: str,
+        epoch: int,
+        shard_id: str,
+        stratum: str,
+        family_keys: Iterable[str],
+        unit_profile: str,
+        paired_delta: float,
+        uncertainty: float,
+        noninferiority_margin: float,
+        positive_effect: float = 0.0,
+    ) -> "CalibrationObservation":
+        return cls(
+            candidate_id=candidate_id,
+            parent_id=parent_id,
+            lineage_id=lineage_id,
+            epoch=epoch,
+            shard_id=shard_id,
+            stratum=stratum,
+            family_keys=tuple(family_keys),
+            unit_profile=unit_profile,
+            paired_delta=paired_delta,
+            uncertainty=uncertainty,
+            label=classify_calibration_label(
+                paired_delta,
+                uncertainty,
+                noninferiority_margin=noninferiority_margin,
+                positive_effect=positive_effect,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class PublicCalibrationCard:
+    """Sanitized feedback safe for the Test Author and Search Agent.
+
+    Continuous posteriors, exact counts, candidates, lineages, shards, deltas,
+    and task-level outcomes deliberately do not cross this boundary.
+    """
+
+    family_key: str
+    unit_profile: str
+    transfer_band: TransferBand
+    uncertainty: UncertaintyBand
+    support_bucket: str
+    status: CalibrationStatus
+    version: int
+
+    def to_dict(self) -> dict[str, str | int]:
         return {
-            "count": self.count,
-            "audit_positive": self.audit_positive,
-            "audit_noninferior": self.audit_noninferior,
-            "promotion_correct": self.promotion_correct,
-            "p_audit_positive": (self.audit_positive + 1) / (self.count + 2),
-            "p_audit_noninferior": (self.audit_noninferior + 1) / (self.count + 2),
+            "family_key": self.family_key,
+            "unit_profile": self.unit_profile,
+            "transfer_band": self.transfer_band.value,
+            "uncertainty": self.uncertainty.value,
+            "support_bucket": self.support_bucket,
+            "status": self.status.value,
+            "version": self.version,
+        }
+
+
+@dataclass(frozen=True)
+class TriggerAssessment:
+    triggered: bool
+    reasons: tuple[CalibrationTrigger, ...]
+    version: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "triggered": self.triggered,
+            "reasons": [reason.value for reason in self.reasons],
+            "version": self.version,
         }
 
 
 @dataclass
-class CalibrationState:
-    version: int = 1
-    bins: dict[str, CalibrationBin] = field(default_factory=dict)
-    family_stats: dict[str, dict[str, int]] = field(default_factory=dict)
-    records: list[dict[str, Any]] = field(default_factory=list)
+class _PosteriorEvidence:
+    """Private Beta(1, 1) sufficient statistics for one family/context."""
+
+    transfer_alpha: float = 1.0
+    transfer_beta: float = 1.0
+    harmful_alpha: float = 1.0
+    harmful_beta: float = 1.0
+    effective_n: float = 0.0
+
+    def add(self, label: CalibrationLabel, weight: float) -> None:
+        if label is CalibrationLabel.INCONCLUSIVE:
+            return
+
+        # NONINFERIOR is deliberately neutral, fractional evidence for the
+        # positive-transfer target. It is not counted as a positive outcome.
+        transfer_success = {
+            CalibrationLabel.POSITIVE: 1.0,
+            CalibrationLabel.NONINFERIOR: 0.5,
+            CalibrationLabel.NEGATIVE: 0.0,
+        }[label]
+        harmful = float(label is CalibrationLabel.NEGATIVE)
+        self.transfer_alpha += weight * transfer_success
+        self.transfer_beta += weight * (1.0 - transfer_success)
+        self.harmful_alpha += weight * harmful
+        self.harmful_beta += weight * (1.0 - harmful)
+        self.effective_n += weight
+
+    @property
+    def transfer_mean(self) -> float:
+        return self.transfer_alpha / (self.transfer_alpha + self.transfer_beta)
+
+    @property
+    def harmful_mean(self) -> float:
+        return self.harmful_alpha / (self.harmful_alpha + self.harmful_beta)
+
+    @property
+    def transfer_stddev(self) -> float:
+        total = self.transfer_alpha + self.transfer_beta
+        variance = (
+            self.transfer_alpha * self.transfer_beta / (total * total * (total + 1.0))
+        )
+        return math.sqrt(variance)
 
 
-class CrossLayerCalibrator:
-    """Small online calibration ledger, intentionally not a learned reward model."""
+class AlignmentCalibrator:
+    """Append-only private calibration ledger with a sanitized public view.
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.state = self._load()
+    Every informative observation contributes total weight one across all its
+    families, so a packet with many tags creates no more evidence than a packet
+    with one tag. Each (family_key, unit_profile) cell has a Beta(1, 1) prior.
+    """
 
-    def update(
+    def __init__(self, ledger_path: Path) -> None:
+        self.ledger_path = ledger_path
+        self._observations = tuple(
+            CalibrationObservation.from_dict(row) for row in read_jsonl(ledger_path)
+        )
+        self._identities = {observation.identity for observation in self._observations}
+        if len(self._identities) != len(self._observations):
+            raise ValueError(f"duplicate calibration observations in {ledger_path}")
+
+    @property
+    def observations(self) -> tuple[CalibrationObservation, ...]:
+        """Private observations; never pass this value to an agent prompt."""
+
+        return self._observations
+
+    @property
+    def version(self) -> int:
+        return max((observation.epoch for observation in self._observations), default=0)
+
+    def append(self, observation: CalibrationObservation) -> None:
+        """Append one observation without replacing or rewriting prior evidence."""
+
+        if observation.identity in self._identities:
+            raise ValueError(f"observation already exists: {observation.identity!r}")
+        append_jsonl(self.ledger_path, observation.to_dict())
+        self._observations = (*self._observations, observation)
+        self._identities.add(observation.identity)
+
+    def append_many(self, observations: Iterable[CalibrationObservation]) -> None:
+        for observation in observations:
+            self.append(observation)
+
+    def public_cards(
         self,
         *,
-        evidence: EvidenceRecord,
-        decision: DecisionRecord,
-        family_ids: set[str],
-    ) -> None:
-        key = self._bin_key(evidence)
-        record = {
-            "iteration": evidence.iteration,
-            "candidate_id": evidence.candidate_id,
-            "bin": key,
-            "evidence": evidence.to_dict(),
-            "decision": decision.decision.value,
-            "families": sorted(family_ids),
-        }
-        self.state.records = [
-            item
-            for item in self.state.records
-            if not (
-                int(item.get("iteration") or -1) == evidence.iteration
-                and str(item.get("candidate_id") or "") == evidence.candidate_id
-            )
-        ]
-        self.state.records.append(record)
-        self.state.records.sort(
-            key=lambda item: (
-                int(item.get("iteration") or 0),
-                str(item.get("candidate_id") or ""),
-            )
+        exclude_candidate: str | None = None,
+        exclude_lineage: str | None = None,
+        min_effective_n: float = 1.0,
+    ) -> tuple[PublicCalibrationCard, ...]:
+        """Return discrete, privacy-preserving calibration summaries.
+
+        Exclusions implement delayed or leave-one-lineage-out feedback. Cells
+        below min_effective_n are omitted rather than exposing exact support.
+        Version names the full ledger epoch even when an exclusion changes view.
+        """
+
+        _require_nonnegative_finite("min_effective_n", min_effective_n)
+        evidence = self._aggregate(
+            observation
+            for observation in self._observations
+            if observation.candidate_id != exclude_candidate
+            and observation.lineage_id != exclude_lineage
         )
-        self._recompute()
-        self.save()
-
-    def _recompute(self) -> None:
-        self.state.bins = {}
-        self.state.family_stats = {}
-        for record in self.state.records:
-            values = dict(record.get("evidence") or {})
-            audit_delta = values.get("audit_delta")
-            if audit_delta is None:
+        cards: list[PublicCalibrationCard] = []
+        for (family_key, unit_profile), posterior in sorted(evidence.items()):
+            if posterior.effective_n < min_effective_n:
                 continue
-            audit_delta = float(audit_delta)
-            key = str(record.get("bin") or "unknown")
-            bin_stats = self.state.bins.setdefault(key, CalibrationBin())
-            bin_stats.count += 1
-            bin_stats.audit_positive += int(audit_delta > 0)
-            bin_stats.audit_noninferior += int(audit_delta >= 0)
-            bin_stats.promotion_correct += int(
-                record.get("decision") == "promote" and audit_delta > 0
-            )
-            unit_positive = (
-                float(values.get("public_gain") or 0.0) > 0
-                and float(values.get("hidden_gain") or 0.0) > 0
-            )
-            for family_id in record.get("families") or []:
-                stats = self.state.family_stats.setdefault(
-                    str(family_id),
-                    {"audited": 0, "audit_positive": 0, "unit_positive": 0},
+            transfer_band = _transfer_band(posterior.transfer_mean)
+            uncertainty = _uncertainty_band(posterior.transfer_stddev)
+            if (
+                posterior.harmful_mean >= 2.0 / 3.0
+                and uncertainty is not UncertaintyBand.HIGH
+            ):
+                status = CalibrationStatus.CHALLENGED
+            elif (
+                transfer_band is TransferBand.HIGH
+                and uncertainty is not UncertaintyBand.HIGH
+            ):
+                status = CalibrationStatus.SUPPORTED
+            else:
+                status = CalibrationStatus.UNCERTAIN
+            cards.append(
+                PublicCalibrationCard(
+                    family_key=family_key,
+                    unit_profile=unit_profile,
+                    transfer_band=transfer_band,
+                    uncertainty=uncertainty,
+                    support_bucket=_support_bucket(posterior.effective_n),
+                    status=status,
+                    version=self.version,
                 )
-                stats["audited"] += 1
-                stats["unit_positive"] += int(unit_positive)
-                stats["audit_positive"] += int(audit_delta > 0)
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "version": self.state.version,
-            "bins": {key: value.to_dict() for key, value in self.state.bins.items()},
-            "family_stats": self.state.family_stats,
-            "records": self.state.records,
-            "cross_level_metrics": self._cross_level_metrics(),
-        }
-
-    def _cross_level_metrics(self) -> dict[str, Any]:
-        audited = [
-            record
-            for record in self.state.records
-            if (record.get("evidence") or {}).get("audit_delta") is not None
-        ]
-        if not audited:
-            return {
-                "n": 0,
-                "target": "audit_delta > 0",
-                "baseline_features": ["diagnostic_delta_sign"],
-                "proxy_features": [
-                    "diagnostic_delta_sign",
-                    "public_gain_sign",
-                    "hidden_gain_sign",
-                ],
-                "conditional_information_bits": None,
-            }
-
-        labels = [
-            int(float((record.get("evidence") or {}).get("audit_delta")) > 0)
-            for record in audited
-        ]
-
-        def train_key(record: Mapping[str, Any]) -> str:
-            evidence = dict(record.get("evidence") or {})
-            delta = evidence.get("diagnostic_delta")
-            if delta is None:
-                return "train?"
-            return "train+" if float(delta) > 0 else "train0-"
-
-        def proxy_key(record: Mapping[str, Any]) -> str:
-            evidence = dict(record.get("evidence") or {})
-            public = float(evidence.get("public_gain") or 0.0) > 0
-            hidden = float(evidence.get("hidden_gain") or 0.0) > 0
-            unit = "unit+" if public and hidden else "unit-"
-            return f"{train_key(record)}|{unit}"
-
-        def loo_predictions(key_fn: Any) -> list[float]:
-            totals: dict[str, list[int]] = {}
-            for record, label in zip(audited, labels, strict=True):
-                key = key_fn(record)
-                stats = totals.setdefault(key, [0, 0])
-                stats[0] += 1
-                stats[1] += label
-            predictions: list[float] = []
-            for record, label in zip(audited, labels, strict=True):
-                count, positives = totals[key_fn(record)]
-                predictions.append((positives - label + 1) / (count - 1 + 2))
-            return predictions
-
-        def scores(predictions: list[float]) -> tuple[float, float]:
-            log_loss = -sum(
-                label * math.log(max(1e-9, prediction))
-                + (1 - label) * math.log(max(1e-9, 1 - prediction))
-                for label, prediction in zip(labels, predictions, strict=True)
-            ) / len(labels)
-            brier = sum(
-                (prediction - label) ** 2
-                for label, prediction in zip(labels, predictions, strict=True)
-            ) / len(labels)
-            return log_loss, brier
-
-        baseline_log_loss, baseline_brier = scores(loo_predictions(train_key))
-        proxy_log_loss, proxy_brier = scores(loo_predictions(proxy_key))
-        promoted = [
-            (record, label)
-            for record, label in zip(audited, labels, strict=True)
-            if record.get("decision") == "promote"
-        ]
-        return {
-            "n": len(audited),
-            "target": "audit_delta > 0",
-            "protocol": "leave_one_edit_out_beta_1_1",
-            "baseline_features": ["diagnostic_delta_sign"],
-            "proxy_features": [
-                "diagnostic_delta_sign",
-                "public_gain_sign",
-                "hidden_gain_sign",
-            ],
-            "baseline_log_loss": baseline_log_loss,
-            "proxy_log_loss": proxy_log_loss,
-            "baseline_brier": baseline_brier,
-            "proxy_brier": proxy_brier,
-            "conditional_information_bits": (baseline_log_loss - proxy_log_loss)
-            / math.log(2),
-            "promotions": len(promoted),
-            "false_promotions": sum(1 for _, label in promoted if not label),
-        }
-
-    def save(self) -> None:
-        write_json(self.path, self.summary())
-
-    def _load(self) -> CalibrationState:
-        if not self.path.is_file():
-            return CalibrationState()
-        raw = read_json(self.path)
-        bins = {
-            str(key): CalibrationBin(
-                count=int(value.get("count") or 0),
-                audit_positive=int(value.get("audit_positive") or 0),
-                audit_noninferior=int(value.get("audit_noninferior") or 0),
-                promotion_correct=int(value.get("promotion_correct") or 0),
             )
-            for key, value in dict(raw.get("bins") or {}).items()
+        return tuple(cards)
+
+    def assess_triggers(
+        self,
+        *,
+        family_keys: Iterable[str],
+        unit_profile: str,
+        unit_positive: bool | None = None,
+        search_positive: bool | None = None,
+        composition_signature: str | None = None,
+        known_composition_signatures: Collection[str] = (),
+    ) -> TriggerAssessment:
+        """Assess rotation triggers without reserving or consuming a shard."""
+
+        requested_families = tuple(
+            sorted({key.strip() for key in family_keys if key.strip()})
+        )
+        if not requested_families:
+            raise ValueError("family_keys must contain at least one non-empty key")
+        if not unit_profile.strip():
+            raise ValueError("unit_profile must not be empty")
+
+        known_families = {
+            family_key
+            for observation in self._observations
+            for family_key in observation.family_keys
         }
-        return CalibrationState(
-            version=int(raw.get("version") or 1),
-            bins=bins,
-            family_stats={
-                str(key): {str(k): int(v) for k, v in dict(value).items()}
-                for key, value in dict(raw.get("family_stats") or {}).items()
-            },
-            records=list(raw.get("records") or []),
+        reasons: set[CalibrationTrigger] = set()
+        seen_requested = [
+            family_key
+            for family_key in requested_families
+            if family_key in known_families
+        ]
+        if len(seen_requested) != len(requested_families):
+            reasons.add(CalibrationTrigger.UNSEEN_FAMILY)
+
+        cards = {
+            (card.family_key, card.unit_profile): card
+            for card in self.public_cards(min_effective_n=0.0)
+        }
+        if any(
+            (family_key, unit_profile) not in cards
+            or cards[(family_key, unit_profile)].uncertainty is UncertaintyBand.HIGH
+            for family_key in seen_requested
+        ):
+            reasons.add(CalibrationTrigger.HIGH_UNCERTAINTY)
+
+        if (
+            unit_positive is not None
+            and search_positive is not None
+            and unit_positive != search_positive
+        ):
+            reasons.add(CalibrationTrigger.UNIT_SEARCH_DISAGREEMENT)
+
+        if (
+            composition_signature is not None
+            and composition_signature not in known_composition_signatures
+        ):
+            reasons.add(CalibrationTrigger.NOVEL_COMPOSITION)
+
+        ordered = tuple(reason for reason in CalibrationTrigger if reason in reasons)
+        return TriggerAssessment(
+            triggered=bool(ordered),
+            reasons=ordered,
+            version=self.version,
         )
 
     @staticmethod
-    def _bin_key(evidence: EvidenceRecord) -> str:
-        unit = (
-            "unit+"
-            if evidence.public_gain > 0 and evidence.hidden_gain > 0
-            else "unit-"
-        )
-        train = (
-            "diag?"
-            if evidence.diagnostic_delta is None
-            else ("diag+" if evidence.diagnostic_delta > 0 else "diag0-")
-        )
-        bridge = "bridge+" if evidence.bridge_gain > 0 else "bridge0"
-        return f"{unit}|{bridge}|{train}"
+    def _aggregate(
+        observations: Iterable[CalibrationObservation],
+    ) -> dict[tuple[str, str], _PosteriorEvidence]:
+        result: dict[tuple[str, str], _PosteriorEvidence] = {}
+        for observation in observations:
+            family_weight = 1.0 / len(observation.family_keys)
+            for family_key in observation.family_keys:
+                posterior = result.setdefault(
+                    (family_key, observation.unit_profile), _PosteriorEvidence()
+                )
+                posterior.add(observation.label, family_weight)
+        return result
+
+
+def _transfer_band(mean: float) -> TransferBand:
+    if mean >= 2.0 / 3.0:
+        return TransferBand.HIGH
+    if mean <= 1.0 / 3.0:
+        return TransferBand.LOW
+    return TransferBand.MEDIUM
+
+
+def _uncertainty_band(stddev: float) -> UncertaintyBand:
+    if stddev <= 0.12:
+        return UncertaintyBand.LOW
+    if stddev <= 0.20:
+        return UncertaintyBand.MEDIUM
+    return UncertaintyBand.HIGH
+
+
+def _support_bucket(effective_n: float) -> str:
+    if effective_n < 1.0:
+        return "<1"
+    if effective_n < 3.0:
+        return "1-2"
+    if effective_n < 6.0:
+        return "3-5"
+    if effective_n < 10.0:
+        return "6-9"
+    return "10+"
+
+
+def _require_finite(name: str, value: float) -> None:
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+
+
+def _require_nonnegative_finite(name: str, value: float) -> None:
+    _require_finite(name, value)
+    if value < 0:
+        raise ValueError(f"{name} must be nonnegative")

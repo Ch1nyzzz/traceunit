@@ -13,21 +13,48 @@ class RunStore:
         self.root = root.resolve()
         self.state_path = self.root / "run_state.json"
         self.events_path = self.root / "events.jsonl"
-        self.calibration_path = self.root / "calibration.json"
+        self.search_attempts_path = self.root / "search_attempts.jsonl"
+        self.benchmark_plan_path = self.root / "benchmark_data" / "plan.json"
+        self.calibration_root = self.root / "calibration"
+        self.calibration_observations_path = (
+            self.calibration_root / "private_observations.jsonl"
+        )
+        self.calibration_cards_path = self.calibration_root / "public_cards.json"
+        self.calibration_queue_path = self.calibration_root / "pending.jsonl"
+        self.component_archive_root = self.root / "component_archive"
+        self.packet_store_root = self.root / "frozen_packets"
+        self.sealed_root = self.root / "sealed"
 
-    def initialize(self, *, config_snapshot: dict[str, Any]) -> None:
+    def initialize(
+        self,
+        *,
+        config_snapshot: dict[str, Any],
+        capabilities: dict[str, bool] | None = None,
+    ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        for name in (
+        names = [
             "iterations",
             "candidates",
             "evaluations",
-            "partial_archive",
             "sealed",
-            "test_library",
-        ):
+        ]
+        enabled = dict(capabilities or {})
+        if enabled.get("generated_packets", True):
+            names.extend(["test_library", "frozen_packets"])
+        if enabled.get("partial_archive", True):
+            names.append("component_archive")
+        if enabled.get("delayed_alignment", True):
+            names.extend(["calibration", "calibration/checkpoints"])
+        for name in names:
             (self.root / name).mkdir(exist_ok=True)
         config_path = self.root / "config.snapshot.json"
-        if not config_path.exists():
+        if config_path.exists():
+            if read_json(config_path) != _json_safe(config_snapshot):
+                raise RuntimeError(
+                    "run configuration differs from the frozen config snapshot; "
+                    "use a new loop.run_dir"
+                )
+        else:
             write_json(config_path, config_snapshot)
 
     def load_state(self) -> RunState | None:
@@ -54,7 +81,19 @@ class RunStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def evaluation_dir(self, candidate_id: str, split: str) -> Path:
-        path = self.root / "evaluations" / candidate_id / split
+    def evaluation_dir(self, candidate_id: str, pool_id: str) -> Path:
+        path = self.root / "evaluations" / candidate_id / pool_id
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "value"):
+        return value.value
+    return value

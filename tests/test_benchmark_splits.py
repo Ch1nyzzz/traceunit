@@ -19,24 +19,49 @@ from traceunit.benchmarks.swebench import (
     _finalize_evaluation,
     _official_eval_identity,
     _representative_order,
+    _repo_cluster,
     _run_official_patch_evaluation,
     _split_rows,
     _validate_disjoint_pools,
 )
+from traceunit.benchmarks.pools import load_pool_items
 from traceunit.config import BenchmarkConfig, load_config
-from traceunit.models import BenchmarkEvaluation, TaskOutcome
+from traceunit.io import sha256_file
+from traceunit.models import (
+    BenchmarkEvaluation,
+    PoolRole,
+    PoolSliceRef,
+    TaskOutcome,
+)
 
 
 def test_swebench_split_is_stable_and_disjoint() -> None:
-    rows = [{"instance_id": f"repo__issue-{i}"} for i in range(100)]
-    first = _split_rows(rows, seed=7, diagnostic_fraction=0.6, canary_fraction=0.2)
-    second = _split_rows(rows, seed=7, diagnostic_fraction=0.6, canary_fraction=0.2)
+    rows = [
+        {
+            "instance_id": f"org-{repository}__issue-{index}",
+            "repo": f"org/repo-{repository}",
+        }
+        for repository in range(20)
+        for index in range(3)
+    ]
+    first = _split_rows(rows, seed=7, search_fraction=0.6, calibration_fraction=0.2)
+    second = _split_rows(
+        list(reversed(rows)),
+        seed=7,
+        search_fraction=0.6,
+        calibration_fraction=0.2,
+    )
     assert first == second
     ids = [{row["instance_id"] for row in first[name]} for name in first]
     assert not ids[0] & ids[1]
     assert not ids[0] & ids[2]
     assert not ids[1] & ids[2]
     assert set.union(*ids) == {row["instance_id"] for row in rows}
+    cluster_owners: dict[str, str] = {}
+    for name, items in first.items():
+        for item in items:
+            cluster = _repo_cluster(item)
+            assert cluster_owners.setdefault(cluster, name) == name
 
 
 def test_swebench_representative_order_is_input_independent_and_interleaved() -> None:
@@ -45,10 +70,8 @@ def test_swebench_representative_order_is_input_independent_and_interleaved() ->
         for repo in ("org/alpha", "org/beta", "org/gamma")
         for index in range(4)
     ]
-    first = _representative_order(rows, seed=13, namespace="diagnostic")
-    second = _representative_order(
-        list(reversed(rows)), seed=13, namespace="diagnostic"
-    )
+    first = _representative_order(rows, seed=13, namespace="search")
+    second = _representative_order(list(reversed(rows)), seed=13, namespace="search")
     assert [row["instance_id"] for row in first] == [
         row["instance_id"] for row in second
     ]
@@ -59,14 +82,16 @@ def test_swebench_rejects_overlapping_explicit_pools() -> None:
     with pytest.raises(ValueError, match="appears in both"):
         _validate_disjoint_pools(
             {
-                "diagnostic": [{"instance_id": "org__issue-1"}],
-                "canary": [{"instance_id": "org__issue-1"}],
-                "audit": [],
+                "search": [{"instance_id": "org__issue-1", "repo": "org/repo"}],
+                "calibration": [{"instance_id": "org__issue-1", "repo": "org/repo"}],
+                "final": [],
             }
         )
 
 
-def test_swebench_prepare_strips_private_fields(tmp_path: Path) -> None:
+def test_swebench_prepare_freezes_repo_disjoint_plan_and_strips_private_fields(
+    tmp_path: Path,
+) -> None:
     worldcalib = tmp_path / "worldcalib"
     (worldcalib / "src/worldcalib/coding").mkdir(parents=True)
     (worldcalib / "src/worldcalib/coding/swebench.py").write_text("", encoding="utf-8")
@@ -74,14 +99,15 @@ def test_swebench_prepare_strips_private_fields(tmp_path: Path) -> None:
     seed.mkdir(parents=True)
     rows = [
         {
-            "instance_id": f"repo__issue-{i}",
+            "instance_id": f"repo-{repository}__issue-{index}",
             "problem_statement": "public",
-            "repo": "org/repo",
+            "repo": f"org/repo-{repository}",
             "base_commit": "abc",
             "patch": "SECRET",
             "test_patch": "PRIVATE",
         }
-        for i in range(20)
+        for repository in range(12)
+        for index in range(2)
     ]
     data = tmp_path / "verified.json"
     data.write_text(json.dumps(rows), encoding="utf-8")
@@ -90,18 +116,32 @@ def test_swebench_prepare_strips_private_fields(tmp_path: Path) -> None:
             name="swebench_verified",
             worldcalib_root=worldcalib,
             seed_source_path=seed,
-            diagnostic_data_path=data,
+            search_data_path=data,
+            calibration_shard_size=3,
         )
     )
     run = tmp_path / "run"
-    adapter.prepare(run)
-    text = (run / "benchmark_data/swebench_verified/diagnostic.json").read_text()
-    assert "SECRET" not in text
-    assert "PRIVATE" not in text
-    assert "problem_statement" in text
+    plan = adapter.prepare(run)
+    assert plan == adapter._plan
+    assert (run / "benchmark_data/swebench_verified/plan.json").is_file()
+    refs = (plan.search, *plan.calibration, plan.final)
+    assert plan.calibration
+    seen_clusters: set[str] = set()
+    seen_instances: set[str] = set()
+    for ref in refs:
+        assert not seen_clusters.intersection(ref.cluster_ids)
+        seen_clusters.update(ref.cluster_ids)
+        text = Path(ref.manifest_path).read_text(encoding="utf-8")
+        assert "SECRET" not in text
+        assert "PRIVATE" not in text
+        assert "problem_statement" in text
+        instance_ids = {item["instance_id"] for item in load_pool_items(ref)}
+        assert not seen_instances.intersection(instance_ids)
+        seen_instances.update(instance_ids)
+    assert len(seen_instances) == len(rows)
 
 
-def test_swebench_cache_fingerprint_binds_pool_limit_config_and_harness(
+def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
     tmp_path: Path,
 ) -> None:
     worldcalib = tmp_path / "worldcalib"
@@ -113,6 +153,13 @@ def test_swebench_cache_fingerprint_binds_pool_limit_config_and_harness(
     entry.write_text("entry-v1", encoding="utf-8")
     pool = tmp_path / "pool.json"
     pool.write_text('[{"instance_id":"a"}]', encoding="utf-8")
+    pool_ref = PoolSliceRef(
+        slice_id="search",
+        role=PoolRole.SEARCH,
+        manifest_path=str(pool),
+        manifest_sha256=sha256_file(pool),
+        cluster_ids=("instance:a",),
+    )
     config = BenchmarkConfig(
         name="swebench_verified",
         worldcalib_root=worldcalib,
@@ -121,23 +168,23 @@ def test_swebench_cache_fingerprint_binds_pool_limit_config_and_harness(
 
     first, payload = _evaluation_cache_fingerprint(
         source_hash="source-a",
-        pool_path=pool,
-        split="diagnostic",
-        limit=5,
+        pool=pool_ref,
         config=config,
     )
-    different_limit, _ = _evaluation_cache_fingerprint(
+    different_slice, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
-        pool_path=pool,
-        split="diagnostic",
-        limit=6,
+        pool=PoolSliceRef(
+            slice_id="calibration_000",
+            role=PoolRole.CALIBRATION,
+            manifest_path=str(pool),
+            manifest_sha256=pool_ref.manifest_sha256,
+            cluster_ids=pool_ref.cluster_ids,
+        ),
         config=config,
     )
     different_model, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
-        pool_path=pool,
-        split="diagnostic",
-        limit=5,
+        pool=pool_ref,
         config=BenchmarkConfig(
             name="swebench_verified",
             worldcalib_root=worldcalib,
@@ -147,25 +194,28 @@ def test_swebench_cache_fingerprint_binds_pool_limit_config_and_harness(
     pool.write_text('[{"instance_id":"b"}]', encoding="utf-8")
     different_pool, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
-        pool_path=pool,
-        split="diagnostic",
-        limit=5,
+        pool=PoolSliceRef(
+            slice_id=pool_ref.slice_id,
+            role=pool_ref.role,
+            manifest_path=str(pool),
+            manifest_sha256=sha256_file(pool),
+            cluster_ids=("instance:b",),
+        ),
         config=config,
     )
     pool.write_text('[{"instance_id":"a"}]', encoding="utf-8")
     runner.write_text("runner-v2", encoding="utf-8")
     different_harness, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
-        pool_path=pool,
-        split="diagnostic",
-        limit=5,
+        pool=pool_ref,
         config=config,
     )
 
     assert payload["source_sha256"] == "source-a"
+    assert payload["pool"]["manifest_sha256"] == pool_ref.manifest_sha256
     assert (
         len(
-            {first, different_limit, different_model, different_pool, different_harness}
+            {first, different_slice, different_model, different_pool, different_harness}
         )
         == 5
     )
@@ -391,7 +441,7 @@ def test_swebench_finalize_evaluation_preserves_task_status_and_usage() -> None:
         evaluation_id="eval-1",
         benchmark="swebench_verified",
         candidate_id="candidate-a",
-        split="diagnostic",
+        split="search",
         score=0.0,
         passrate=0.0,
         cost=0.0,
@@ -426,20 +476,67 @@ def test_swebench_finalize_evaluation_preserves_task_status_and_usage() -> None:
     assert finalized.metadata["task_status_counts"] == {"agent_timeout": 1}
 
 
-def test_appworld_canary_and_audit_are_scenario_disjoint() -> None:
+def test_appworld_calibration_and_final_are_scenario_disjoint() -> None:
     tasks = [
         f"scenario_{scenario}_{variant}"
         for scenario in range(10)
         for variant in (1, 2, 3)
     ]
-    canary, audit = _split_heldout_scenarios(
-        tasks, seed=11, canary_limit=6, audit_limit=15
+    calibration, final = _split_heldout_scenarios(
+        tasks, seed=11, calibration_fraction=0.2
     )
-    canary_scenarios = {task.rsplit("_", 1)[0] for task in canary}
-    audit_scenarios = {task.rsplit("_", 1)[0] for task in audit}
-    assert canary_scenarios
-    assert audit_scenarios
-    assert not canary_scenarios & audit_scenarios
+    calibration_scenarios = {task.rsplit("_", 1)[0] for task in calibration}
+    final_scenarios = {task.rsplit("_", 1)[0] for task in final}
+    assert calibration_scenarios
+    assert final_scenarios
+    assert not calibration_scenarios & final_scenarios
+
+
+def test_appworld_prepare_freezes_scenario_disjoint_calibration_shards(
+    tmp_path: Path,
+) -> None:
+    worldcalib = tmp_path / "worldcalib"
+    python = worldcalib / ".venv-appworld/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    search = [
+        f"search_scenario_{scenario}_{variant}"
+        for scenario in range(3)
+        for variant in (1, 2, 3)
+    ]
+    heldout = [
+        f"heldout_scenario_{scenario}_{variant}"
+        for scenario in range(12)
+        for variant in (1, 2, 3)
+    ]
+    manifest = tmp_path / "split.json"
+    manifest.write_text(
+        json.dumps({"train": search, "test": heldout}),
+        encoding="utf-8",
+    )
+    adapter = AppWorldAdapter(
+        BenchmarkConfig(
+            name="appworld",
+            worldcalib_root=worldcalib,
+            split_manifest_path=manifest,
+            calibration_shard_size=4,
+        )
+    )
+
+    plan = adapter.prepare(tmp_path / "run")
+
+    assert (tmp_path / "run/benchmark_data/appworld/plan.json").is_file()
+    assert len(plan.calibration) >= 2
+    refs = (plan.search, *plan.calibration, plan.final)
+    scenario_owner: dict[str, str] = {}
+    task_ids: set[str] = set()
+    for ref in refs:
+        for task_id in load_pool_items(ref):
+            assert task_id not in task_ids
+            task_ids.add(task_id)
+            scenario = task_id.rsplit("_", 1)[0]
+            assert scenario_owner.setdefault(scenario, ref.slice_id) == ref.slice_id
+    assert task_ids == set(search) | set(heldout)
 
 
 def test_appworld_candidate_mounts_exclude_ground_truth(

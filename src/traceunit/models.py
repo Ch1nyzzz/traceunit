@@ -7,10 +7,12 @@ from typing import Any, Mapping
 
 class Decision(StrEnum):
     REJECT = "reject"
-    PARTIAL_ARCHIVE = "partial_archive"
-    ESCALATE = "escalate"
+    PARTIAL_ELIGIBLE = "partial_eligible"
+    ARCHIVE = "archive"
+    QUARANTINE = "quarantine"
+    EVALUATE_SEARCH = "evaluate_search"
     PROMOTE = "promote"
-    TEST_CHALLENGE = "test_challenge"
+    CHALLENGE_PACKET = "challenge_packet"
 
 
 class TestTier(StrEnum):
@@ -27,6 +29,12 @@ class TestStatus(StrEnum):
     REJECTED = "rejected"
     CHALLENGED = "challenged"
     RETIRED = "retired"
+
+
+class PoolRole(StrEnum):
+    SEARCH = "search"
+    CALIBRATION = "calibration"
+    FINAL = "final"
 
 
 @dataclass(frozen=True)
@@ -240,6 +248,64 @@ class TaskOutcome:
 
 
 @dataclass(frozen=True)
+class PoolSliceRef:
+    slice_id: str
+    role: PoolRole
+    manifest_path: str
+    manifest_sha256: str
+    cluster_ids: tuple[str, ...]
+    ordinal: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["role"] = self.role.value
+        value["cluster_ids"] = list(self.cluster_ids)
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "PoolSliceRef":
+        return cls(
+            slice_id=str(value["slice_id"]),
+            role=PoolRole(str(value["role"])),
+            manifest_path=str(value["manifest_path"]),
+            manifest_sha256=str(value["manifest_sha256"]),
+            cluster_ids=tuple(str(item) for item in value.get("cluster_ids") or []),
+            ordinal=int(value.get("ordinal") or 0),
+        )
+
+
+@dataclass(frozen=True)
+class BenchmarkPlan:
+    benchmark: str
+    search: PoolSliceRef
+    calibration: tuple[PoolSliceRef, ...]
+    final: PoolSliceRef
+    plan_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "benchmark": self.benchmark,
+            "search": self.search.to_dict(),
+            "calibration": [item.to_dict() for item in self.calibration],
+            "final": self.final.to_dict(),
+            "plan_sha256": self.plan_sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "BenchmarkPlan":
+        return cls(
+            benchmark=str(value["benchmark"]),
+            search=PoolSliceRef.from_dict(dict(value["search"])),
+            calibration=tuple(
+                PoolSliceRef.from_dict(dict(item))
+                for item in value.get("calibration") or []
+            ),
+            final=PoolSliceRef.from_dict(dict(value["final"])),
+            plan_sha256=str(value["plan_sha256"]),
+        )
+
+
+@dataclass(frozen=True)
 class BenchmarkEvaluation:
     evaluation_id: str
     benchmark: str
@@ -285,6 +351,8 @@ class CandidateProposal:
     mechanism_claim: str
     predicted_effect: str
     regression_risks: tuple[str, ...] = ()
+    plan_id: str = ""
+    selected_archive_ids: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -299,8 +367,66 @@ class CandidateProposal:
             mechanism_claim=str(value.get("mechanism_claim") or ""),
             predicted_effect=str(value.get("predicted_effect") or ""),
             regression_risks=tuple(str(x) for x in value.get("regression_risks") or []),
+            plan_id=str(value.get("plan_id") or ""),
+            selected_archive_ids=tuple(
+                str(item) for item in value.get("selected_archive_ids") or []
+            ),
             metadata=dict(value.get("metadata") or {}),
         )
+
+
+@dataclass(frozen=True)
+class ScoreOnlyProposal:
+    candidate_id: str
+    parent_id: str
+    mechanism_claim: str
+    predicted_effect: str
+    regression_risks: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ScoreOnlyProposal":
+        return cls(
+            candidate_id=str(value["candidate_id"]),
+            parent_id=str(value["parent_id"]),
+            mechanism_claim=str(value.get("mechanism_claim") or ""),
+            predicted_effect=str(value.get("predicted_effect") or ""),
+            regression_risks=tuple(
+                str(item) for item in value.get("regression_risks") or []
+            ),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True)
+class ScoreOnlyEvidence:
+    iteration: int
+    candidate_id: str
+    parent_id: str
+    search_delta: float | None
+    total_cost: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ScoreOnlyDecisionRecord:
+    iteration: int
+    candidate_id: str
+    decision: Decision
+    reason: str
+    confidence: float
+    evidence: ScoreOnlyEvidence
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["decision"] = self.decision.value
+        return value
 
 
 @dataclass(frozen=True)
@@ -313,9 +439,9 @@ class EvidenceRecord:
     bridge_gain: float
     regression_loss: float
     admission_score: float
-    diagnostic_delta: float | None = None
-    canary_delta: float | None = None
-    audit_delta: float | None = None
+    search_delta: float | None = None
+    archive_replay_passed: bool = True
+    preservation_passed: bool = True
     total_cost: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -324,10 +450,6 @@ class EvidenceRecord:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceRecord":
-        def optional_float(name: str) -> float | None:
-            raw = value.get(name)
-            return None if raw is None else float(raw)
-
         return cls(
             iteration=int(value["iteration"]),
             candidate_id=str(value["candidate_id"]),
@@ -337,9 +459,13 @@ class EvidenceRecord:
             bridge_gain=float(value.get("bridge_gain") or 0.0),
             regression_loss=float(value.get("regression_loss") or 0.0),
             admission_score=float(value.get("admission_score") or 0.0),
-            diagnostic_delta=optional_float("diagnostic_delta"),
-            canary_delta=optional_float("canary_delta"),
-            audit_delta=optional_float("audit_delta"),
+            search_delta=(
+                None
+                if value.get("search_delta") is None
+                else float(value["search_delta"])
+            ),
+            archive_replay_passed=bool(value.get("archive_replay_passed", True)),
+            preservation_passed=bool(value.get("preservation_passed", True)),
             total_cost=float(value.get("total_cost") or 0.0),
             metadata=dict(value.get("metadata") or {}),
         )
@@ -379,14 +505,25 @@ class RunState:
     next_iteration: int
     incumbent_id: str
     incumbent_source: str
-    incumbent_diagnostic_score: float
-    incumbent_canary_score: float | None = None
+    incumbent_search_score: float
+    condition: str = "c3_full"
+    capabilities: dict[str, bool] = field(default_factory=dict)
     promoted_ids: list[str] = field(default_factory=list)
-    partial_archive_ids: list[str] = field(default_factory=list)
+    archive_ids: list[str] = field(default_factory=list)
+    partial_eligible_ids: list[str] = field(default_factory=list)
+    quarantined_ids: list[str] = field(default_factory=list)
     challenged_packet_ids: list[str] = field(default_factory=list)
+    preserved_packet_refs: list[dict[str, str]] = field(default_factory=list)
     active_packet_id: str = ""
     active_packet_path: str = ""
     active_packet_uses: int = 0
+    calibration_epoch: int = 0
+    next_calibration_shard: int = 0
+    pending_calibration_ids: list[str] = field(default_factory=list)
+    committed_iterations: list[int] = field(default_factory=list)
+    applied_calibration_checkpoint_ids: list[str] = field(default_factory=list)
+    search_cost: float = 0.0
+    calibration_cost: float = 0.0
     total_cost: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -401,23 +538,40 @@ class RunState:
             next_iteration=int(value.get("next_iteration") or 1),
             incumbent_id=str(value["incumbent_id"]),
             incumbent_source=str(value["incumbent_source"]),
-            incumbent_diagnostic_score=float(
-                value.get("incumbent_diagnostic_score") or 0.0
-            ),
-            incumbent_canary_score=(
-                None
-                if value.get("incumbent_canary_score") is None
-                else float(value["incumbent_canary_score"])
-            ),
+            incumbent_search_score=float(value.get("incumbent_search_score") or 0.0),
+            condition=str(value.get("condition") or "c3_full"),
+            capabilities={
+                str(key): bool(item)
+                for key, item in dict(value.get("capabilities") or {}).items()
+            },
             promoted_ids=[str(x) for x in value.get("promoted_ids") or []],
-            partial_archive_ids=[
-                str(x) for x in value.get("partial_archive_ids") or []
+            archive_ids=[str(x) for x in value.get("archive_ids") or []],
+            partial_eligible_ids=[
+                str(x) for x in value.get("partial_eligible_ids") or []
             ],
+            quarantined_ids=[str(x) for x in value.get("quarantined_ids") or []],
             challenged_packet_ids=[
                 str(x) for x in value.get("challenged_packet_ids") or []
+            ],
+            preserved_packet_refs=[
+                {str(key): str(item) for key, item in dict(ref).items()}
+                for ref in value.get("preserved_packet_refs") or []
             ],
             active_packet_id=str(value.get("active_packet_id") or ""),
             active_packet_path=str(value.get("active_packet_path") or ""),
             active_packet_uses=int(value.get("active_packet_uses") or 0),
+            calibration_epoch=int(value.get("calibration_epoch") or 0),
+            next_calibration_shard=int(value.get("next_calibration_shard") or 0),
+            pending_calibration_ids=[
+                str(x) for x in value.get("pending_calibration_ids") or []
+            ],
+            committed_iterations=[
+                int(x) for x in value.get("committed_iterations") or []
+            ],
+            applied_calibration_checkpoint_ids=[
+                str(x) for x in value.get("applied_calibration_checkpoint_ids") or []
+            ],
+            search_cost=float(value.get("search_cost") or 0.0),
+            calibration_cost=float(value.get("calibration_cost") or 0.0),
             total_cost=float(value.get("total_cost") or 0.0),
         )

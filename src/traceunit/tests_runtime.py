@@ -80,13 +80,13 @@ def load_test_packet(bundle: Path) -> TestPacket:
 
 
 def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
-    audit_only = packet.metadata.get("packet_kind") == "audit"
+    regression_only = packet.metadata.get("packet_kind") == "regression"
     hypothesis_ids = {item.hypothesis_id for item in packet.hypotheses}
     if not hypothesis_ids:
         raise InvalidTestPacket("at least one failure hypothesis is required")
     if packet.target_hypothesis_id not in hypothesis_ids:
         raise InvalidTestPacket("target_hypothesis_id is not present in hypotheses")
-    if not audit_only:
+    if not regression_only:
         if len(hypothesis_ids) < 2:
             raise InvalidTestPacket(
                 "normal packet must contain at least two competing failure hypotheses"
@@ -152,11 +152,11 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             raise InvalidTestPacket(
                 f"non-public test must live under a hidden directory: {case.path}"
             )
-    if audit_only:
+    if regression_only:
         invalid = tiers - {TestTier.REGRESSION, TestTier.ADMISSION}
         if invalid:
             raise InvalidTestPacket(
-                "audit packet may contain only regression/admission cases"
+                "regression packet may contain only regression/admission cases"
             )
     elif TestTier.PUBLIC not in tiers or TestTier.HIDDEN not in tiers:
         raise InvalidTestPacket(
@@ -848,3 +848,30 @@ def paired_test_metrics(
             regressions / len(regression_cases) if regression_cases else 0.0
         ),
     }
+
+
+def candidate_contract(
+    packet: TestPacket,
+    candidate_results: Iterable[TestExecution],
+) -> tuple[bool, list[str]]:
+    """Fail closed unless every frozen case has its declared candidate outcome."""
+
+    by_id = {item.case_id: item for item in candidate_results}
+    reasons: list[str] = []
+    for case in packet.cases:
+        result = by_id.get(case.case_id)
+        if result is None:
+            reasons.append(f"{case.case_id}: missing candidate result")
+            continue
+        if result.timed_out:
+            reasons.append(f"{case.case_id}: candidate execution timed out")
+            continue
+        if result.error:
+            reasons.append(f"{case.case_id}: candidate execution error")
+            continue
+        if result.passed != case.expected_candidate_pass:
+            reasons.append(
+                f"{case.case_id}: candidate passed={result.passed}, "
+                f"expected={case.expected_candidate_pass}"
+            )
+    return not reasons, reasons
