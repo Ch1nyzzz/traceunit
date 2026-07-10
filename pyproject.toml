@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traceunit"
+version = "0.1.0"
+description = "Trace-conditioned causal proxy tests for self-evolving agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "PyYAML>=6.0",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+swebench = [
+  "datasets>=2.19",
+]
+
+[project.scripts]
+traceunit = "traceunit.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

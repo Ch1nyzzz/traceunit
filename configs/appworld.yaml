@@ -1,0 +1,63 @@
+loop:
+  run_dir: ../runs/appworld_traceunit
+  run_id: appworld_traceunit
+  iterations: 5
+  seed: 1729
+  resume: true
+  max_failure_traces: 8
+  max_candidates_per_packet: 2
+  posthoc_audit: true
+
+benchmark:
+  name: appworld
+  worldcalib_root: /data/home/yuhan/WorldCalib
+  seed_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
+  split_manifest_path: /data/home/yuhan/WorldCalib/data/appworld/split_challenge.json
+  diagnostic_split: train
+  audit_split: test
+  diagnostic_limit: 15
+  canary_limit: 9
+  audit_limit: 30
+  split_seed: 1729
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  concurrency: 4
+  repeats: 1
+  max_interactions: 100
+  timeout_s: 600
+  dry_run: false
+
+agents:
+  experimentalist:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    reasoning_effort: high
+    timeout_s: 1800
+  optimizer:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    reasoning_effort: high
+    timeout_s: 3600
+  auditor:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: false
+
+decision:
+  min_admission_score: 0.75
+  min_public_gain: 1.0
+  min_hidden_gain: 0.5
+  min_bridge_gain: 0.5
+  max_regression_loss: 0.0
+  min_diagnostic_delta: 0.0
+  min_canary_delta: 0.0
+  min_audit_delta: 0.0
+  noninferiority_margin: 0.0
+  rejected_probe_rate: 0.10
+  require_audit_for_promotion: false

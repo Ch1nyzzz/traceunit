@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict
+from pathlib import Path
+
+from traceunit.benchmarks import build_benchmark
+from traceunit.config import load_config
+from traceunit.optimizer import OptimizationLoop
+from traceunit.tests_runtime import load_test_packet, verify_frozen_packet
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="traceunit",
+        description="Trace-conditioned causal proxy-test optimization loop",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("optimize", "prepare", "validate-config"):
+        command = sub.add_parser(name)
+        command.add_argument("--config", type=Path, required=True)
+    inspect = sub.add_parser("inspect")
+    inspect.add_argument("--run-dir", type=Path, required=True)
+    packet = sub.add_parser("validate-packet")
+    packet.add_argument("--bundle", type=Path, required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.command == "inspect":
+        summary = args.run_dir / "summary.json"
+        state = args.run_dir / "run_state.json"
+        path = summary if summary.is_file() else state
+        if not path.is_file():
+            raise SystemExit(f"no run state found under {args.run_dir}")
+        print(path.read_text(encoding="utf-8"))
+        return 0
+    if args.command == "validate-packet":
+        packet = load_test_packet(args.bundle)
+        payload = packet.to_dict()
+        payload["hash_valid"] = (
+            verify_frozen_packet(args.bundle, packet) if packet.content_sha256 else None
+        )
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    config = load_config(args.config)
+    if args.command == "validate-config":
+        print(json.dumps(asdict(config), indent=2, ensure_ascii=False, default=str))
+        return 0
+    if args.command == "prepare":
+        adapter = build_benchmark(config.benchmark)
+        config.loop.run_dir.mkdir(parents=True, exist_ok=True)
+        adapter.prepare(config.loop.run_dir)
+        print(
+            json.dumps(
+                {
+                    "benchmark": adapter.name,
+                    "run_dir": str(config.loop.run_dir),
+                    "seed_source": str(adapter.seed_source()),
+                    "status": "prepared",
+                },
+                indent=2,
+            )
+        )
+        return 0
+    summary = OptimizationLoop(config).run()
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
