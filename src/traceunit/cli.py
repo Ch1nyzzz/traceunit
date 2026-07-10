@@ -6,8 +6,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from traceunit.benchmarks import build_benchmark
+from traceunit.benchmarks.pools import load_benchmark_plan
 from traceunit.config import load_config
+from traceunit.final_evaluation import FinalEvaluationRunner
 from traceunit.optimizer import OptimizationLoop
+from traceunit.store import RunStore
 from traceunit.tests_runtime import load_test_packet, verify_frozen_packet
 
 
@@ -17,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Trace-conditioned causal proxy-test optimization loop",
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("optimize", "prepare", "validate-config"):
+    for name in ("optimize", "prepare", "validate-config", "final-evaluate"):
         command = sub.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
     inspect = sub.add_parser("inspect")
@@ -53,18 +56,41 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare":
         adapter = build_benchmark(config.benchmark)
         config.loop.run_dir.mkdir(parents=True, exist_ok=True)
-        adapter.prepare(config.loop.run_dir)
+        plan = adapter.prepare(config.loop.run_dir)
         print(
             json.dumps(
                 {
                     "benchmark": adapter.name,
                     "run_dir": str(config.loop.run_dir),
                     "seed_source": str(adapter.seed_source()),
+                    "benchmark_plan_sha256": plan.plan_sha256,
+                    "calibration_shards": len(plan.calibration),
                     "status": "prepared",
                 },
                 indent=2,
             )
         )
+        return 0
+    if args.command == "final-evaluate":
+        store = RunStore(config.loop.run_dir)
+        state = store.load_state()
+        if state is None:
+            raise SystemExit(f"no completed search under {config.loop.run_dir}")
+        adapter = build_benchmark(config.benchmark)
+        if not store.benchmark_plan_path.is_file():
+            raise SystemExit(
+                f"frozen benchmark plan is missing: {store.benchmark_plan_path}"
+            )
+        plan = load_benchmark_plan(store.benchmark_plan_path)
+        adapter.bind_plan(plan)
+        adapter.preflight()
+        runner = FinalEvaluationRunner(
+            store=store,
+            benchmark=adapter,
+            benchmark_plan=plan,
+        )
+        report = runner.run(runner.seal(state))
+        print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
     summary = OptimizationLoop(config).run()
     print(json.dumps(summary, indent=2, ensure_ascii=False))

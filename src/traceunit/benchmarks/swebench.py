@@ -18,16 +18,22 @@ from traceunit.benchmarks.common import (
     normalize_worldcalib_result,
     worldcalib_import,
 )
+from traceunit.benchmarks.pools import (
+    freeze_benchmark_plan,
+    load_benchmark_plan,
+    load_pool_items,
+    partition_by_cluster,
+)
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
-from traceunit.models import BenchmarkEvaluation
+from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
 LOCAL_VERIFIED_DATA = Path(
     "/data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json"
 )
 
-ADAPTER_CACHE_VERSION = 3
+ADAPTER_CACHE_VERSION = 4
 SWEBENCH_HARNESS_SPEC = "swebench==4.1.0"
 _SAFE_TRACE_METRIC_KEYS = {
     "repo",
@@ -48,9 +54,9 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
 
     def __init__(self, config: BenchmarkConfig) -> None:
         self.config = config
-        self._pool_paths: dict[str, Path] = {}
+        self._plan: BenchmarkPlan | None = None
 
-    def prepare(self, work_dir: Path) -> None:
+    def prepare(self, work_dir: Path) -> BenchmarkPlan:
         root = self.config.worldcalib_root
         if not (root / "src/worldcalib/coding/swebench.py").is_file():
             raise FileNotFoundError(
@@ -62,12 +68,32 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             )
         pool_dir = work_dir / "benchmark_data" / "swebench_verified"
         pool_dir.mkdir(parents=True, exist_ok=True)
+        frozen_plan = pool_dir / "plan.json"
+        if frozen_plan.is_file():
+            plan = load_benchmark_plan(frozen_plan)
+            self.bind_plan(plan)
+            for pool in (plan.search, *plan.calibration, plan.final):
+                load_pool_items(pool)
+            return plan
         configured = {
-            "diagnostic": self.config.diagnostic_data_path,
-            "canary": self.config.canary_data_path,
-            "audit": self.config.audit_data_path,
+            "search": self.config.search_data_path,
+            "calibration": self.config.calibration_data_path,
+            "final": self.config.final_data_path,
         }
-        if all(path and path.is_file() for path in configured.values()):
+        has_explicit_heldout = any(
+            configured[name] is not None for name in ("calibration", "final")
+        )
+        if has_explicit_heldout:
+            missing = [
+                name
+                for name, path in configured.items()
+                if path is None or not path.is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    "explicit SWE-bench pools require readable search, calibration, "
+                    f"and final files; missing={missing}"
+                )
             pools = {
                 name: _representative_order(
                     _load_rows(configured_path),
@@ -77,11 +103,8 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
                 for name, configured_path in configured.items()
                 if configured_path is not None
             }
-            source_description: Any = {
-                name: str(path) for name, path in configured.items()
-            }
         else:
-            source_path = self.config.diagnostic_data_path
+            source_path = self.config.search_data_path
             if source_path is None and LOCAL_VERIFIED_DATA.is_file():
                 source_path = LOCAL_VERIFIED_DATA
             if source_path is not None and source_path.is_file():
@@ -94,38 +117,46 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             pools = _split_rows(
                 rows,
                 seed=self.config.split_seed,
-                diagnostic_fraction=self.config.diagnostic_fraction,
-                canary_fraction=self.config.canary_fraction,
+                search_fraction=self.config.search_fraction,
+                calibration_fraction=self.config.calibration_fraction,
             )
-            source_description = str(source_path) if source_path else "huggingface"
 
-        _validate_disjoint_pools(pools)
-        for name, items in pools.items():
-            path = pool_dir / f"{name}.json"
-            # The visible runner needs only public issue fields. Gold patches and
-            # test specifications never enter Test Author or Optimizer workspaces.
-            public_rows = [_public_row(item, split=name) for item in items]
-            path.write_text(
-                json.dumps(public_rows, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+        limits = {
+            "search": self.config.search_limit,
+            "calibration": self.config.calibration_limit,
+            "final": self.config.final_limit,
+        }
+        pools = {
+            name: _take_cluster_groups(items, limits[name])
+            for name, items in pools.items()
+        }
+        if not pools["search"] or not pools["final"]:
+            raise ValueError("SWE-bench search and final pools must be non-empty")
+        if self.config.calibration_fraction > 0 and not pools["calibration"]:
+            raise ValueError(
+                "SWE-bench calibration pool must be non-empty when calibration is enabled"
             )
-            self._pool_paths[name] = path
-        write_json(
-            pool_dir / "manifest.json",
-            {
-                "dataset": self.config.dataset_name,
-                "source_split": self.config.dataset_split,
-                "source": source_description,
-                "seed": self.config.split_seed,
-                "pools": {
-                    name: [
-                        str(item.get("instance_id") or item.get("task_id"))
-                        for item in items
-                    ]
-                    for name, items in pools.items()
-                },
-            },
+        _validate_disjoint_pools(pools)
+        calibration_shards = partition_by_cluster(
+            pools["calibration"],
+            cluster_key=_repo_cluster,
+            shard_size=self.config.calibration_shard_size,
         )
+        public_search = [_public_row(item, split="search") for item in pools["search"]]
+        public_calibration = [
+            [_public_row(item, split="calibration") for item in shard]
+            for shard in calibration_shards
+        ]
+        public_final = [_public_row(item, split="final") for item in pools["final"]]
+        self._plan = freeze_benchmark_plan(
+            root=pool_dir,
+            benchmark=self.name,
+            search_items=public_search,
+            calibration_shards=public_calibration,
+            final_items=public_final,
+            cluster_key=_repo_cluster,
+        )
+        return self._plan
 
     def preflight(self) -> None:
         if self.config.dry_run:
@@ -167,24 +198,25 @@ official SWE-bench harness."""
         *,
         source: Path,
         candidate_id: str,
-        split: str,
+        pool: PoolSliceRef,
         out_dir: Path,
-        limit_override: int | None = None,
     ) -> BenchmarkEvaluation:
         if self.config.evaluator_command:
             raise RuntimeError(
                 "custom SWE evaluator_command is disabled; use the adapter-owned "
                 "patch-specific official evaluator"
             )
-        if split not in self._pool_paths:
-            raise ValueError(f"unknown SWE-bench pool: {split}")
-        limit = self._limit(split) if limit_override is None else max(0, limit_override)
+        if self._plan is None:
+            raise RuntimeError("prepare() must be called before evaluate()")
+        known = (self._plan.search, *self._plan.calibration, self._plan.final)
+        if pool not in known:
+            raise ValueError(f"pool is not part of the prepared plan: {pool.slice_id}")
+        load_pool_items(pool)
+        pool_path = Path(pool.manifest_path)
         source_hash = sha256_tree(source)
         cache_fingerprint, cache_payload = _evaluation_cache_fingerprint(
             source_hash=source_hash,
-            pool_path=self._pool_paths[split],
-            split=split,
-            limit=limit,
+            pool=pool,
             config=self.config,
         )
         cached = load_cached_evaluation(out_dir)
@@ -204,9 +236,7 @@ official SWE-bench harness."""
                 load_swebench_instances,
             )
 
-            instances = load_swebench_instances(
-                self._pool_paths[split], split=split, limit=limit
-            )
+            instances = load_swebench_instances(pool_path, split=pool.slice_id, limit=0)
             runner = MiniSweAgentSourceRunner(
                 instances=instances,
                 out_dir=out_dir,
@@ -233,7 +263,7 @@ official SWE-bench harness."""
         evaluation = normalize_worldcalib_result(
             result_path=Path(result.result_path),
             benchmark=self.name,
-            split=split,
+            split=pool.slice_id,
             candidate_id=candidate_id,
             out_dir=out_dir,
         )
@@ -282,13 +312,6 @@ official SWE-bench harness."""
         }
         return [message for token, message in banned.items() if token in added]
 
-    def _limit(self, split: str) -> int:
-        return {
-            "diagnostic": self.config.diagnostic_limit,
-            "canary": self.config.canary_limit,
-            "audit": self.config.audit_limit,
-        }[split]
-
     def _default_agent_command(self) -> str:
         script = self.config.worldcalib_root / "scripts/run_miniswe_swebench_single.py"
         return (
@@ -335,7 +358,7 @@ def _download_verified(*, dataset_name: str, split: str) -> list[dict[str, Any]]
     except ImportError as exc:
         raise RuntimeError(
             "SWE-bench Verified data is not configured. Install traceunit[swebench] "
-            "or provide benchmark.diagnostic_data_path."
+            "or provide benchmark.search_data_path."
         ) from exc
     dataset = load_dataset(dataset_name, split=split)
     return [dict(row) for row in dataset]
@@ -344,9 +367,7 @@ def _download_verified(*, dataset_name: str, split: str) -> list[dict[str, Any]]
 def _evaluation_cache_fingerprint(
     *,
     source_hash: str,
-    pool_path: Path,
-    split: str,
-    limit: int,
+    pool: PoolSliceRef,
     config: BenchmarkConfig,
 ) -> tuple[str, dict[str, Any]]:
     worldcalib_runner = config.worldcalib_root / "src/worldcalib/coding/swebench.py"
@@ -355,9 +376,13 @@ def _evaluation_cache_fingerprint(
         "adapter_cache_version": ADAPTER_CACHE_VERSION,
         "swebench_harness_spec": SWEBENCH_HARNESS_SPEC,
         "source_sha256": source_hash,
-        "pool_sha256": sha256_file(pool_path),
-        "split": split,
-        "limit": limit,
+        "pool": {
+            "slice_id": pool.slice_id,
+            "role": pool.role.value,
+            "manifest_sha256": pool.manifest_sha256,
+            "cluster_ids": pool.cluster_ids,
+            "ordinal": pool.ordinal,
+        },
         "model": config.model,
         "base_url": config.base_url,
         "api_key_env": config.api_key_env,
@@ -397,6 +422,32 @@ def _row_id(row: Mapping[str, Any]) -> str:
     return str(row.get("instance_id") or row.get("task_id") or "").strip()
 
 
+def _repo_cluster(row: Mapping[str, Any]) -> str:
+    repository = str(row.get("repo") or "").strip()
+    if repository:
+        return f"repo:{repository}"
+    instance_id = _row_id(row)
+    if not instance_id:
+        raise ValueError("SWE-bench row is missing instance_id/task_id")
+    return f"instance:{instance_id}"
+
+
+def _take_cluster_groups(
+    rows: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    if limit <= 0 or len(rows) <= limit:
+        return list(rows)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(_repo_cluster(row), []).append(row)
+    selected: list[dict[str, Any]] = []
+    for group in groups.values():
+        if selected and len(selected) + len(group) > limit:
+            break
+        selected.extend(group)
+    return selected
+
+
 def _representative_order(
     rows: list[dict[str, Any]], *, seed: int, namespace: str
 ) -> list[dict[str, Any]]:
@@ -433,73 +484,101 @@ def _representative_order(
 
 
 def _validate_disjoint_pools(pools: Mapping[str, list[dict[str, Any]]]) -> None:
-    owner: dict[str, str] = {}
+    item_owner: dict[str, str] = {}
+    cluster_owner: dict[str, str] = {}
     for name, rows in pools.items():
         for row in rows:
             instance_id = _row_id(row)
             if not instance_id:
                 raise ValueError(f"{name} pool contains a row without an instance id")
-            previous = owner.get(instance_id)
+            previous = item_owner.get(instance_id)
             if previous is not None:
                 raise ValueError(
                     f"SWE-bench instance {instance_id!r} appears in both "
                     f"{previous!r} and {name!r} pools"
                 )
-            owner[instance_id] = name
+            item_owner[instance_id] = name
+            cluster = _repo_cluster(row)
+            cluster_previous = cluster_owner.get(cluster)
+            if cluster_previous is not None and cluster_previous != name:
+                raise ValueError(
+                    f"SWE-bench cluster {cluster!r} appears in both "
+                    f"{cluster_previous!r} and {name!r} pools"
+                )
+            cluster_owner[cluster] = name
 
 
 def _split_rows(
     rows: list[dict[str, Any]],
     *,
     seed: int,
-    diagnostic_fraction: float,
-    canary_fraction: float,
+    search_fraction: float,
+    calibration_fraction: float,
 ) -> dict[str, list[dict[str, Any]]]:
-    if not 0 < diagnostic_fraction < 1:
-        raise ValueError("diagnostic_fraction must be between 0 and 1")
-    if not 0 <= canary_fraction < 1 or diagnostic_fraction + canary_fraction >= 1:
-        raise ValueError("diagnostic_fraction + canary_fraction must be less than 1")
+    if not 0 < search_fraction < 1:
+        raise ValueError("search_fraction must be between 0 and 1")
+    if not 0 <= calibration_fraction < 1 or search_fraction + calibration_fraction >= 1:
+        raise ValueError("search_fraction + calibration_fraction must be less than 1")
     pools: dict[str, list[dict[str, Any]]] = {
-        "diagnostic": [],
-        "canary": [],
-        "audit": [],
+        "search": [],
+        "calibration": [],
+        "final": [],
     }
+    groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        instance_id = str(row.get("instance_id") or row.get("task_id") or "")
+        groups.setdefault(_repo_cluster(row), []).append(row)
+    for cluster, group in groups.items():
         value = (
             int.from_bytes(
-                hashlib.sha256(f"{seed}:{instance_id}".encode()).digest()[:8], "big"
+                hashlib.sha256(f"{seed}:{cluster}".encode()).digest()[:8], "big"
             )
             / 2**64
         )
-        if value < diagnostic_fraction:
-            pool = "diagnostic"
-        elif value < diagnostic_fraction + canary_fraction:
-            pool = "canary"
+        if value < search_fraction:
+            pool = "search"
+        elif value < search_fraction + calibration_fraction:
+            pool = "calibration"
         else:
-            pool = "audit"
-        pools[pool].append(row)
-    if len(rows) >= 3 and any(not items for items in pools.values()):
-        ordered = sorted(
-            rows,
-            key=lambda row: hashlib.sha256(
-                f"{seed}:{row.get('instance_id') or row.get('task_id')}".encode()
+            pool = "final"
+        pools[pool].extend(group)
+
+    required = ["search", "final"]
+    if calibration_fraction > 0:
+        required.append("calibration")
+    if len(groups) >= len(required) and any(not pools[name] for name in required):
+        ordered_clusters = sorted(
+            groups,
+            key=lambda cluster: hashlib.sha256(
+                f"{seed}:fallback:{cluster}".encode()
             ).hexdigest(),
         )
-        d_count = max(
-            1, min(len(ordered) - 2, round(len(ordered) * diagnostic_fraction))
-        )
-        c_count = max(
+        cluster_count = len(ordered_clusters)
+        search_count = max(
             1,
             min(
-                len(ordered) - d_count - 1,
-                round(len(ordered) * canary_fraction),
+                cluster_count - len(required) + 1,
+                round(cluster_count * search_fraction),
             ),
         )
+        calibration_count = 0
+        if calibration_fraction > 0:
+            calibration_count = max(
+                1,
+                min(
+                    cluster_count - search_count - 1,
+                    round(cluster_count * calibration_fraction),
+                ),
+            )
+        assigned = {
+            "search": ordered_clusters[:search_count],
+            "calibration": ordered_clusters[
+                search_count : search_count + calibration_count
+            ],
+            "final": ordered_clusters[search_count + calibration_count :],
+        }
         pools = {
-            "diagnostic": ordered[:d_count],
-            "canary": ordered[d_count : d_count + c_count],
-            "audit": ordered[d_count + c_count :],
+            name: [row for cluster in cluster_ids for row in groups[cluster]]
+            for name, cluster_ids in assigned.items()
         }
     return {
         name: _representative_order(items, seed=seed, namespace=name)

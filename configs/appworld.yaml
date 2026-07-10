@@ -5,19 +5,22 @@ loop:
   seed: 1729
   resume: true
   max_failure_traces: 8
-  max_candidates_per_packet: 2
-  posthoc_audit: true
+  max_attempts_per_packet: 4
+
+protocol:
+  condition: c3_full
 
 benchmark:
   name: appworld
   worldcalib_root: /data/home/yuhan/WorldCalib
   seed_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
   split_manifest_path: /data/home/yuhan/WorldCalib/data/appworld/split_challenge.json
-  diagnostic_split: train
-  audit_split: test
-  diagnostic_limit: 15
-  canary_limit: 9
-  audit_limit: 30
+  search_split: train
+  heldout_split: test
+  search_limit: 45
+  calibration_limit: 30
+  calibration_shard_size: 9
+  final_limit: 60
   split_seed: 1729
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com
@@ -29,19 +32,19 @@ benchmark:
   dry_run: false
 
 agents:
-  experimentalist:
+  test_author:
     provider: codex
     isolation: docker
     container_image: node:20-slim
     reasoning_effort: high
     timeout_s: 1800
-  optimizer:
+  search:
     provider: codex
     isolation: docker
     container_image: node:20-slim
     reasoning_effort: high
     timeout_s: 3600
-  auditor:
+  regression_author:
     provider: codex
     isolation: docker
     container_image: node:20-slim
@@ -55,9 +58,17 @@ decision:
   min_hidden_gain: 0.5
   min_bridge_gain: 0.5
   max_regression_loss: 0.0
-  min_diagnostic_delta: 0.0
-  min_canary_delta: 0.0
-  min_audit_delta: 0.0
+  min_search_delta: 0.0
   noninferiority_margin: 0.0
-  rejected_probe_rate: 0.10
-  require_audit_for_promotion: false
+
+alignment:
+  min_candidates_per_checkpoint: 4
+  max_candidates_per_checkpoint: 12
+  min_effective_n: 3.0
+  positive_margin: 0.0
+  trigger_on_new_family: true
+  trigger_on_disagreement: true
+  trigger_on_novel_composition: true
+
+archive:
+  allow_semantic_port: true

@@ -109,28 +109,35 @@ def source_diff(before: Path, after: Path) -> str:
         new_path = after / relative
         old = _text_lines(old_path)
         new = _text_lines(new_path)
+        if old is None or new is None:
+            raise ValueError(
+                f"binary source changes cannot be represented safely: {relative}"
+            )
         if old == new:
             continue
         chunks.extend(
             difflib.unified_diff(
                 old,
                 new,
-                fromfile=f"a/{relative.as_posix()}",
-                tofile=f"b/{relative.as_posix()}",
+                fromfile=(
+                    f"a/{relative.as_posix()}" if old_path.is_file() else "/dev/null"
+                ),
+                tofile=(
+                    f"b/{relative.as_posix()}" if new_path.is_file() else "/dev/null"
+                ),
                 lineterm="",
             )
         )
     return "\n".join(chunks) + ("\n" if chunks else "")
 
 
-def _text_lines(path: Path) -> list[str]:
+def _text_lines(path: Path) -> list[str] | None:
     if not path.is_file():
         return []
     try:
         return path.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError:
-        digest = sha256_file(path)
-        return [f"<binary sha256={digest}>"]
+        return None
 
 
 def safe_relative_path(root: Path, raw: str) -> Path:
