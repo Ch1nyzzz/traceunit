@@ -21,33 +21,34 @@ def _evidence(**overrides):
     return EvidenceRecord(**values)
 
 
-def test_decision_cascade_and_partial_archive() -> None:
-    policy = DecisionPolicy(DecisionConfig(require_audit_for_promotion=True))
-    assert policy.decide(_evidence()).decision == Decision.ESCALATE
-    assert (
-        policy.decide(_evidence(diagnostic_delta=0.0)).decision
-        == Decision.PARTIAL_ARCHIVE
-    )
-    assert policy.decide(_evidence(diagnostic_delta=0.1)).decision == Decision.ESCALATE
-    assert (
-        policy.decide(_evidence(diagnostic_delta=0.1, canary_delta=0.0)).decision
-        == Decision.ESCALATE
-    )
-    assert (
-        policy.decide(
-            _evidence(diagnostic_delta=0.1, canary_delta=0.0, audit_delta=0.1)
-        ).decision
-        == Decision.PROMOTE
-    )
-
-
-def test_regression_is_rejected_before_natural_evaluation() -> None:
+def test_unit_supported_candidate_requests_search_evaluation() -> None:
     policy = DecisionPolicy(DecisionConfig())
-    assert policy.decide(_evidence(regression_loss=0.5)).decision == Decision.REJECT
+    assert policy.decide(_evidence()).decision is Decision.EVALUATE_SEARCH
 
 
-def test_nonadaptive_protocol_promotes_after_hidden_canary() -> None:
-    policy = DecisionPolicy(DecisionConfig(require_audit_for_promotion=False))
-    record = policy.decide(_evidence(diagnostic_delta=0.1, canary_delta=0.0))
-    assert record.decision == Decision.PROMOTE
-    assert record.evidence.audit_delta is None
+def test_positive_search_delta_promotes_without_hidden_natural_gate() -> None:
+    policy = DecisionPolicy(DecisionConfig())
+    result = policy.decide(_evidence(search_delta=0.1))
+    assert result.decision is Decision.PROMOTE
+
+
+def test_flat_bridged_edit_is_archived() -> None:
+    policy = DecisionPolicy(DecisionConfig(noninferiority_margin=0.02))
+    assert policy.decide(_evidence(search_delta=0.0)).decision is Decision.ARCHIVE
+
+
+def test_negative_bridged_edit_is_quarantined() -> None:
+    policy = DecisionPolicy(DecisionConfig(noninferiority_margin=0.02))
+    assert policy.decide(_evidence(search_delta=-0.1)).decision is Decision.QUARANTINE
+
+
+def test_regression_and_certificate_failures_precede_natural_evaluation() -> None:
+    policy = DecisionPolicy(DecisionConfig())
+    assert policy.decide(_evidence(regression_loss=0.5)).decision is Decision.REJECT
+    assert (
+        policy.decide(_evidence(archive_replay_passed=False)).decision
+        is Decision.REJECT
+    )
+    assert (
+        policy.decide(_evidence(preservation_passed=False)).decision is Decision.REJECT
+    )

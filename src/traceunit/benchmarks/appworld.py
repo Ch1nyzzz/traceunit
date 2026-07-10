@@ -18,11 +18,18 @@ from traceunit.benchmarks.common import (
     load_cached_evaluation,
     normalize_worldcalib_result,
 )
+from traceunit.benchmarks.pools import (
+    freeze_benchmark_plan,
+    load_benchmark_plan,
+    load_pool_items,
+    partition_by_cluster,
+)
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
+from traceunit.models import BenchmarkPlan, PoolSliceRef
 
 
-_ADAPTER_VERSION = 2
+_ADAPTER_VERSION = 3
 
 
 class AppWorldAdapter(BenchmarkAdapter):
@@ -30,61 +37,88 @@ class AppWorldAdapter(BenchmarkAdapter):
 
     def __init__(self, config: BenchmarkConfig) -> None:
         self.config = config
-        self._pools: dict[str, list[str]] = {}
+        self._plan: BenchmarkPlan | None = None
 
-    def prepare(self, work_dir: Path) -> None:
+    def prepare(self, work_dir: Path) -> BenchmarkPlan:
         root = self.config.worldcalib_root
         if not (root / ".venv-appworld/bin/python").exists():
             raise FileNotFoundError(f"AppWorld evaluation venv is missing under {root}")
-        default_challenge = root / "data/appworld/split_challenge.json"
-        default_normal = root / "data/appworld/split.json"
-        source_manifest = (
-            self.config.split_manifest_path
-            or (default_challenge if default_challenge.is_file() else default_normal)
-        ).resolve()
-        if not source_manifest.is_file():
-            raise FileNotFoundError(
-                f"AppWorld split manifest is missing: {source_manifest}"
-            )
-        raw = json.loads(source_manifest.read_text(encoding="utf-8"))
-        diagnostic = list(
-            raw.get(self.config.diagnostic_split) or raw.get("train") or []
-        )
-        heldout = list(raw.get(self.config.audit_split) or raw.get("test") or [])
-        diagnostic = _take_scenario_groups(diagnostic, self.config.diagnostic_limit)
-        canary, audit = _split_heldout_scenarios(
-            heldout,
-            seed=self.config.split_seed,
-            canary_limit=self.config.canary_limit,
-            audit_limit=self.config.audit_limit,
-        )
-        if not diagnostic or not canary or not audit:
-            raise ValueError(
-                "AppWorld diagnostic/canary/audit pools must all be non-empty"
-            )
-        scenario_disjoint = source_manifest.name == "split_challenge.json"
-        _validate_disjoint_pools(
-            diagnostic,
-            canary,
-            audit,
-            require_scenario_disjoint=scenario_disjoint,
-        )
-        self._pools = {
-            "diagnostic": diagnostic,
-            "canary": canary,
-            "audit": audit,
-        }
         pool_dir = work_dir / "benchmark_data" / "appworld"
-        pool_dir.mkdir(parents=True, exist_ok=True)
-        write_json(
-            pool_dir / "manifest.json",
-            {
-                "source": str(source_manifest),
-                "scenario_disjoint": scenario_disjoint,
-                "seed": self.config.split_seed,
-                "pools": self._pools,
-            },
+        frozen_plan = pool_dir / "plan.json"
+        if frozen_plan.is_file():
+            plan = load_benchmark_plan(frozen_plan)
+            self.bind_plan(plan)
+            for pool in (plan.search, *plan.calibration, plan.final):
+                load_pool_items(pool)
+            return plan
+        configured = {
+            "search": self.config.search_data_path,
+            "calibration": self.config.calibration_data_path,
+            "final": self.config.final_data_path,
+        }
+        if any(path is not None for path in configured.values()):
+            missing = [
+                name
+                for name, path in configured.items()
+                if path is None or not path.is_file()
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    "explicit AppWorld pools require readable search, calibration, "
+                    f"and final files; missing={missing}"
+                )
+            search = _load_task_ids(configured["search"])
+            calibration = _load_task_ids(configured["calibration"])
+            final = _load_task_ids(configured["final"])
+        else:
+            default_challenge = root / "data/appworld/split_challenge.json"
+            default_normal = root / "data/appworld/split.json"
+            source_manifest = (
+                self.config.split_manifest_path
+                or (
+                    default_challenge if default_challenge.is_file() else default_normal
+                )
+            ).resolve()
+            if not source_manifest.is_file():
+                raise FileNotFoundError(
+                    f"AppWorld split manifest is missing: {source_manifest}"
+                )
+            raw = json.loads(source_manifest.read_text(encoding="utf-8"))
+            search = list(raw.get(self.config.search_split) or raw.get("train") or [])
+            heldout = list(raw.get(self.config.heldout_split) or raw.get("test") or [])
+            calibration, final = _split_heldout_scenarios(
+                heldout,
+                seed=self.config.benchmark_seed,
+                calibration_fraction=self.config.calibration_fraction,
+            )
+        search = _take_scenario_groups(search, self.config.search_limit)
+        calibration = _take_scenario_groups(calibration, self.config.calibration_limit)
+        final = _take_scenario_groups(final, self.config.final_limit)
+        if not search or not final:
+            raise ValueError("AppWorld search and final pools must be non-empty")
+        if self.config.calibration_fraction > 0 and not calibration:
+            raise ValueError(
+                "AppWorld calibration pool must be non-empty when calibration is enabled"
+            )
+        _validate_disjoint_pools(
+            search,
+            calibration,
+            final,
         )
+        calibration_shards = partition_by_cluster(
+            calibration,
+            cluster_key=_scenario_id,
+            shard_size=self.config.calibration_shard_size,
+        )
+        self._plan = freeze_benchmark_plan(
+            root=pool_dir,
+            benchmark=self.name,
+            search_items=search,
+            calibration_shards=calibration_shards,
+            final_items=final,
+            cluster_key=_scenario_id,
+        )
+        return self._plan
 
     def preflight(self) -> None:
         if self.config.dry_run:
@@ -109,9 +143,9 @@ class AppWorldAdapter(BenchmarkAdapter):
         if inspected.returncode != 0:
             raise RuntimeError("AppWorld sandbox image is not cached: python:3.12-slim")
 
-    def seed_source(self) -> Path:
+    def baseline_source(self) -> Path:
         return (
-            self.config.seed_source_path
+            self.config.baseline_source_path
             or self.config.worldcalib_root / "src/worldcalib/agentic/backends/appworld"
         ).resolve()
 
@@ -128,23 +162,24 @@ sealed process scores the persisted environment state after candidate execution 
         *,
         source: Path,
         candidate_id: str,
-        split: str,
+        pool: PoolSliceRef,
         out_dir: Path,
-        limit_override: int | None = None,
     ):
         source_hash = sha256_tree(source)
-        if split not in self._pools:
-            raise ValueError(f"unknown AppWorld pool: {split}")
-        task_ids = list(self._pools[split])
-        if limit_override is not None and limit_override > 0:
-            task_ids = _take_scenario_groups(task_ids, limit_override)
-        elif self._limit(split):
-            task_ids = _take_scenario_groups(task_ids, self._limit(split))
+        if self._plan is None:
+            raise RuntimeError("prepare() must be called before evaluate()")
+        known = (self._plan.search, *self._plan.calibration, self._plan.final)
+        if pool not in known:
+            raise ValueError(f"pool is not part of the prepared plan: {pool.slice_id}")
+        raw_task_ids = load_pool_items(pool)
+        if not all(isinstance(item, str) and item for item in raw_task_ids):
+            raise ValueError(
+                f"AppWorld pool contains an invalid task id: {pool.slice_id}"
+            )
+        task_ids = list(raw_task_ids)
         fingerprint = self._evaluation_fingerprint(
             source_hash=source_hash,
-            split=split,
-            task_ids=task_ids,
-            limit_override=limit_override,
+            pool=pool,
         )
         cached = load_cached_evaluation(out_dir)
         if (
@@ -221,7 +256,7 @@ sealed process scores the persisted environment state after candidate execution 
         return normalize_worldcalib_result(
             result_path=result_path,
             benchmark=self.name,
-            split=split,
+            split=pool.slice_id,
             candidate_id=candidate_id,
             out_dir=out_dir,
         )
@@ -230,9 +265,7 @@ sealed process scores the persisted environment state after candidate execution 
         self,
         *,
         source_hash: str,
-        split: str,
-        task_ids: list[str],
-        limit_override: int | None,
+        pool: PoolSliceRef,
     ) -> str:
         worker = Path(__file__).with_name("appworld_worker.py")
         appworld_init = (
@@ -246,16 +279,20 @@ sealed process scores the persisted environment state after candidate execution 
                 sha256_file(appworld_init) if appworld_init.is_file() else "missing"
             ),
             "source_sha256": source_hash,
-            "split": split,
-            "task_ids": task_ids,
-            "limit_override": limit_override,
+            "pool": {
+                "slice_id": pool.slice_id,
+                "role": pool.role.value,
+                "manifest_sha256": pool.manifest_sha256,
+                "cluster_ids": pool.cluster_ids,
+                "ordinal": pool.ordinal,
+            },
             "model": self.config.model,
             "base_url": self.config.base_url,
             "api_key_env": self.config.api_key_env,
             "dry_run": self.config.dry_run,
             "repeats": self.config.repeats,
             "max_interactions": self.config.max_interactions,
-            "seed": self.config.split_seed,
+            "seed": self.config.benchmark_seed,
             "timeout_s": self.config.timeout_s,
         }
         return hashlib.sha256(
@@ -294,13 +331,6 @@ sealed process scores the persisted environment state after candidate execution 
             "task_id in": "candidate branches on AppWorld task ids",
         }
         return [message for token, message in banned.items() if token in added]
-
-    def _limit(self, split: str) -> int:
-        return {
-            "diagnostic": self.config.diagnostic_limit,
-            "canary": self.config.canary_limit,
-            "audit": self.config.audit_limit,
-        }[split]
 
     def _run_one(
         self,
@@ -356,7 +386,7 @@ sealed process scores the persisted environment state after candidate execution 
             "--max-interactions",
             str(self.config.max_interactions),
             "--seed",
-            str(self.config.split_seed + rep),
+            str(self.config.benchmark_seed + rep),
         ]
         sandbox_root = task_out / "candidate_appworld"
         sandbox_outputs = sandbox_root / "experiments" / "outputs"
@@ -717,6 +747,31 @@ def _scenario_id(task_id: str) -> str:
     return task_id.rsplit("_", 1)[0]
 
 
+def _load_task_ids(path: Path | None) -> list[str]:
+    if path is None:
+        raise ValueError("AppWorld pool path is required")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, dict):
+        values = next(
+            (
+                payload[key]
+                for key in ("tasks", "instances", "data")
+                if isinstance(payload.get(key), list)
+            ),
+            None,
+        )
+        if values is None:
+            raise ValueError(f"unsupported AppWorld pool shape: {path}")
+    else:
+        raise ValueError(f"unsupported AppWorld pool shape: {path}")
+    task_ids = [str(item).strip() for item in values]
+    if any(not item for item in task_ids):
+        raise ValueError(f"AppWorld pool contains an empty task id: {path}")
+    return task_ids
+
+
 def _take_scenario_groups(task_ids: list[str], limit: int) -> list[str]:
     if not limit or len(task_ids) <= limit:
         return task_ids
@@ -736,9 +791,10 @@ def _split_heldout_scenarios(
     task_ids: list[str],
     *,
     seed: int,
-    canary_limit: int,
-    audit_limit: int,
+    calibration_fraction: float,
 ) -> tuple[list[str], list[str]]:
+    if not 0 <= calibration_fraction < 1:
+        raise ValueError("calibration_fraction must be in [0, 1)")
     groups: dict[str, list[str]] = {}
     for task_id in task_ids:
         groups.setdefault(_scenario_id(task_id), []).append(task_id)
@@ -748,53 +804,58 @@ def _split_heldout_scenarios(
     )
     if not ordered:
         return [], []
-    target_canary = canary_limit or max(1, round(len(task_ids) * 0.2))
-    canary_groups: list[str] = []
+    if calibration_fraction == 0:
+        return [], [task for scenario in ordered for task in groups[scenario]]
+    target_calibration = max(1, round(len(task_ids) * calibration_fraction))
+    calibration_groups: list[str] = []
     count = 0
-    for scenario in ordered:
-        if count >= target_canary and canary_groups:
+    for scenario in ordered[:-1]:
+        if count >= target_calibration and calibration_groups:
             break
-        canary_groups.append(scenario)
+        calibration_groups.append(scenario)
         count += len(groups[scenario])
-    audit_groups = [scenario for scenario in ordered if scenario not in canary_groups]
-    canary = [task for scenario in canary_groups for task in groups[scenario]]
-    audit = [task for scenario in audit_groups for task in groups[scenario]]
-    if canary_limit:
-        canary = _take_scenario_groups(canary, canary_limit)
-    if audit_limit:
-        audit = _take_scenario_groups(audit, audit_limit)
-    return canary, audit
+    final_groups = [
+        scenario for scenario in ordered if scenario not in calibration_groups
+    ]
+    calibration = [task for scenario in calibration_groups for task in groups[scenario]]
+    final = [task for scenario in final_groups for task in groups[scenario]]
+    return calibration, final
 
 
 def _validate_disjoint_pools(
-    diagnostic: list[str],
-    canary: list[str],
-    audit: list[str],
-    *,
-    require_scenario_disjoint: bool = False,
+    search: list[str],
+    calibration: list[str],
+    final: list[str],
 ) -> None:
     pools = {
-        "diagnostic": set(diagnostic),
-        "canary": set(canary),
-        "audit": set(audit),
+        "search": set(search),
+        "calibration": set(calibration),
+        "final": set(final),
     }
     for name, values in pools.items():
-        source = {"diagnostic": diagnostic, "canary": canary, "audit": audit}[name]
+        source = {
+            "search": search,
+            "calibration": calibration,
+            "final": final,
+        }[name]
         if len(values) != len(source):
             raise ValueError(f"AppWorld {name} pool contains duplicate task ids")
-    pairs = (("diagnostic", "canary"), ("diagnostic", "audit"), ("canary", "audit"))
+    pairs = (
+        ("search", "calibration"),
+        ("search", "final"),
+        ("calibration", "final"),
+    )
     for left, right in pairs:
         overlap = pools[left] & pools[right]
         if overlap:
             raise ValueError(
                 f"AppWorld {left}/{right} pools overlap: {sorted(overlap)[:3]}"
             )
-        if require_scenario_disjoint:
-            scenario_overlap = {_scenario_id(task_id) for task_id in pools[left]} & {
-                _scenario_id(task_id) for task_id in pools[right]
-            }
-            if scenario_overlap:
-                raise ValueError(
-                    f"AppWorld {left}/{right} scenarios overlap: "
-                    f"{sorted(scenario_overlap)[:3]}"
-                )
+        scenario_overlap = {_scenario_id(task_id) for task_id in pools[left]} & {
+            _scenario_id(task_id) for task_id in pools[right]
+        }
+        if scenario_overlap:
+            raise ValueError(
+                f"AppWorld {left}/{right} scenarios overlap: "
+                f"{sorted(scenario_overlap)[:3]}"
+            )
