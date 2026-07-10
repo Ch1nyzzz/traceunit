@@ -20,7 +20,7 @@ generalization. It separates:
   bridge, regression, and replay checks;
 - **alignment prior:** versioned, uncertain, aggregate evidence that a unit
   family has transferred for earlier candidates;
-- **final evidence:** a one-way seed-versus-terminal measurement on a pool that
+- **final evidence:** a one-way baseline-versus-terminal measurement on a pool that
   never participates in search or calibration.
 
 ## 2. Immutable benchmark plan
@@ -70,10 +70,10 @@ calibration deltas, exact support counts, or per-task calibration outcomes.
 
 For a new run, the controller:
 
-1. copies the benchmark seed source into the candidate store;
-2. evaluates the seed on the search slice;
+1. copies the benchmark baseline source into the candidate store;
+2. evaluates the baseline on the search slice;
 3. records its normalized traces, score, cost, and source lineage;
-4. initializes the seed as the incumbent;
+4. initializes the baseline as the incumbent;
 5. writes empty version-zero public calibration cards.
 
 The baseline does not open a calibration shard or the final pool.
@@ -333,11 +333,11 @@ The final runner requires a completed or converged search state and seals:
 - the search-state hash;
 - benchmark-plan hash;
 - final pool reference;
-- seed and terminal candidate identifiers;
-- seed and terminal source hashes.
+- baseline and terminal candidate identifiers;
+- baseline and terminal source hashes.
 
 It refuses to replace an existing sealed plan with a different one and refuses
-to evaluate a source that changed after sealing. The report contains seed
+to evaluate a source that changed after sealing. The report contains baseline
 score, terminal score, matched-task paired delta, matched-task count, and final
 cost.
 

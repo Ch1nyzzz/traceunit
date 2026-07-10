@@ -7,7 +7,7 @@ evaluation procedure.
 The four main conditions are executable with `traceunit optimize` by setting
 `protocol.condition` to `c0_score_only`, `c1_raw_traceunit`, `c2_archive`, or
 `c3_full`. There is no batch matrix launcher; scheduling benchmark × condition ×
-seed runs remains external. A run is valid only when its prohibited artifacts
+replicate runs remains external. A run is valid only when its prohibited artifacts
 and feedback paths are absent.
 
 ## 1. Claims
@@ -37,7 +37,7 @@ calibration evidence.
 
 ### Final generalization claim
 
-The selected terminal agent should improve over the seed on a completely
+The selected terminal agent should improve over the fixed baseline on a completely
 unseen, in-distribution final pool. Calibration results cannot support this
 claim because they influence later search.
 
@@ -45,14 +45,19 @@ claim because they influence later search.
 
 The experimental unit is:
 
-    benchmark × condition × seed
+    benchmark × condition × replicate
+
+A replicate is an independent rerun of a potentially stochastic optimization
+procedure. It uses the same baseline harness and frozen BenchmarkPlan as the
+other conditions. It is not a different baseline or a different pool split. If
+the complete procedure is deterministic, identical reruns add no information.
 
 Each paired comparison must share:
 
 - benchmark version and immutable BenchmarkPlan;
 - search, calibration-shard, and final manifest hashes;
 - target model and sampling/runtime settings;
-- seed source;
+- baseline source;
 - maximum search opportunities and convergence rule;
 - task-cluster policy;
 - final-evaluation procedure.
@@ -147,7 +152,7 @@ must be reported separately from the method's online cost.
 
 ### Final
 
-Do not open final while any condition, seed, threshold choice, or terminal
+Do not open final while any condition, planned replicate, threshold choice, or terminal
 selection can still change. The recommended order is:
 
 1. finish every search run;
@@ -183,7 +188,7 @@ The central statistical comparison is:
     proxy model:    Y_i <- (S_i, U_i)
 
 Use a low-capacity, predeclared model and evaluate out of sample. Preferred
-splits are leave-one-seed-out or leave-one-lineage-out; do not train and score
+splits are leave-one-replicate-out or leave-one-lineage-out; do not train and score
 on the same candidate cohort. Report:
 
 - log loss and Brier score for positive natural transfer;
@@ -200,6 +205,51 @@ The strongest evidence for the primary claim is not simply a correlation
 between unit and natural scores. It is an out-of-sample improvement in
 candidate-level prediction or selection after conditioning on visible search
 evidence.
+
+The implemented offline analysis is:
+
+    traceunit analyze-proxy \
+      --run-dir runs/<run-a> \
+      --run-dir runs/<run-b> \
+      --output runs/proxy_analysis.json
+
+Every prediction is produced by a regularized logistic model trained without
+the prediction's run lineage. Categorical family and unit-profile
+vocabularies are also fitted inside each training fold. Inconclusive transfer
+labels are excluded from the binary positive-transfer target but remain in the
+reported label coverage table. The report contains four complementary views:
+
+1. an OOF proxy-alignment reliability curve;
+2. incumbent search score by optimization iteration;
+3. incumbent search score by cumulative search-plus-calibration natural-task
+   cost;
+4. the sealed final baseline-versus-terminal paired outcome, when available.
+
+The first three use search/calibration artifacts. Final results never enter
+proxy fitting, predictions, thresholds, or search curves. An already sealed
+final report is copied only into the terminal-outcome section; the analysis
+command never launches final evaluation.
+
+### 6.1 Selective natural-task evaluation
+
+Once unit evidence has demonstrated prospective alignment, it may be used as a
+cheap first stage in a multi-fidelity evaluation cascade. A candidate below a
+frozen proxy threshold can skip the complete search-pool evaluation, while
+promising or uncertain candidates advance to more expensive natural-task
+evidence. This saves target-system calls only if positive-transfer recall
+remains acceptable.
+
+The proxy report therefore includes a selective full-evaluation curve. For each
+predeclared threshold it reports the full-evaluation rate, avoided-evaluation
+rate, positive recall, strict-negative skip rate, and the expected rates after a
+random audit of skipped candidates. The audit is required to estimate false
+negatives and detect proxy drift; evaluating only proxy-positive candidates
+would make the gate appear safer than it is.
+
+Progressive evaluation allocates test budget; it does not disclose hidden test
+contents or final-pool evidence to an agent. A threshold chosen after inspecting
+the current cohort is descriptive only. It may control search only after being
+frozen and validated on a future cohort.
 
 ## 7. Archive analysis
 
@@ -218,7 +268,7 @@ For C2 and C3 report:
 - final-score contribution of successful component lineages.
 
 The key comparison is C2 versus C1 under the same search opportunities and
-seeds. A component counts as useful only when it is physically retrieved or
+replicates. A component counts as useful only when it is physically retrieved or
 ported, its original packet is replayed, and the resulting composition survives
 the normal decision protocol. Merely listing prior edits in history is not
 composition.
@@ -252,14 +302,14 @@ at that version.
 
 ## 9. Final outcome analysis
 
-For every run, the final report compares seed and terminal on identical matched
+For every run, the final report compares baseline and terminal on identical matched
 tasks. Report:
 
-- seed score;
+- baseline score;
 - terminal score;
 - matched-task paired delta;
 - number of matched tasks;
-- condition-level mean and uncertainty interval across seeds;
+- condition-level mean and uncertainty interval across independent replicates;
 - failure/status composition, not just an aggregate mean;
 - final-evaluation cost.
 
@@ -270,7 +320,7 @@ Primary terminal contrasts are nested:
 - C3 versus C2: delayed alignment calibration;
 - C3 versus C0: complete-system effect.
 
-Use paired seed-level contrasts wherever pool plans and seeds match. For
+Use paired replicate-level contrasts across conditions wherever pool plans match. For
 within-run uncertainty, resample at the benchmark cluster level, not individual
 correlated variants.
 
@@ -302,7 +352,7 @@ Calibration does not run every fixed number of iterations. It stops when no
 registered trigger fires or no unopened shard remains.
 
 Do not continue search because a final result is disappointing. Do not choose
-the reported seed, checkpoint, or condition after viewing final.
+the reported replicate, checkpoint, or condition after viewing final.
 
 ## 11. Cost accounting
 
@@ -344,7 +394,7 @@ For every run archive:
 
 - configuration snapshot;
 - BenchmarkPlan and every manifest hash;
-- seed source hash;
+- baseline source hash;
 - target and role-agent model identifiers;
 - candidate lineage and source hashes;
 - packet and archive content hashes;
@@ -369,7 +419,7 @@ Automated checks should establish:
 
 ## 13. Reporting checklist
 
-The main paper table should include all four conditions, every planned seed,
+The main paper table should include all four conditions, every planned replicate,
 paired final delta, uncertainty interval, search cost, calibration cost, final
 cost, and unit wall time.
 

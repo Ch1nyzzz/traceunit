@@ -88,7 +88,7 @@ class AppWorldAdapter(BenchmarkAdapter):
             heldout = list(raw.get(self.config.heldout_split) or raw.get("test") or [])
             calibration, final = _split_heldout_scenarios(
                 heldout,
-                seed=self.config.split_seed,
+                seed=self.config.benchmark_seed,
                 calibration_fraction=self.config.calibration_fraction,
             )
         search = _take_scenario_groups(search, self.config.search_limit)
@@ -143,9 +143,9 @@ class AppWorldAdapter(BenchmarkAdapter):
         if inspected.returncode != 0:
             raise RuntimeError("AppWorld sandbox image is not cached: python:3.12-slim")
 
-    def seed_source(self) -> Path:
+    def baseline_source(self) -> Path:
         return (
-            self.config.seed_source_path
+            self.config.baseline_source_path
             or self.config.worldcalib_root / "src/worldcalib/agentic/backends/appworld"
         ).resolve()
 
@@ -292,7 +292,7 @@ sealed process scores the persisted environment state after candidate execution 
             "dry_run": self.config.dry_run,
             "repeats": self.config.repeats,
             "max_interactions": self.config.max_interactions,
-            "seed": self.config.split_seed,
+            "seed": self.config.benchmark_seed,
             "timeout_s": self.config.timeout_s,
         }
         return hashlib.sha256(
@@ -386,7 +386,7 @@ sealed process scores the persisted environment state after candidate execution 
             "--max-interactions",
             str(self.config.max_interactions),
             "--seed",
-            str(self.config.split_seed + rep),
+            str(self.config.benchmark_seed + rep),
         ]
         sandbox_root = task_out / "candidate_appworld"
         sandbox_outputs = sandbox_root / "experiments" / "outputs"

@@ -51,7 +51,7 @@ class FakeBenchmark(BenchmarkAdapter):
         )
         return self.plan
 
-    def seed_source(self) -> Path:
+    def baseline_source(self) -> Path:
         return self.seed
 
     def context(self) -> str:
@@ -219,7 +219,7 @@ class SearchAgent:
                 workspace / "proposal.json",
                 {
                     "candidate_id": "iter001_candidate",
-                    "parent_id": "seed",
+                    "parent_id": "baseline",
                     "hypothesis_id": "h1",
                     "mechanism_claim": "change behavior from bad to good",
                     "predicted_effect": "unit and search score improve",
@@ -242,7 +242,7 @@ class ScoreOnlyAgent:
             workspace / "score_only_proposal.json",
             {
                 "candidate_id": "iter001_candidate",
-                "parent_id": "seed",
+                "parent_id": "baseline",
                 "mechanism_claim": "change bad behavior to good",
                 "predicted_effect": "search score improves",
                 "regression_risks": [],
@@ -307,7 +307,7 @@ def test_search_promotes_without_opening_calibration_or_final(tmp_path: Path) ->
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
     assert summary["incumbent_id"] == "iter001_candidate"
-    assert summary["promoted_ids"] == ["seed", "iter001_candidate"]
+    assert summary["promoted_ids"] == ["baseline", "iter001_candidate"]
     assert summary["final_evaluation"] == "not_opened"
     assert benchmark.calls == ["search", "search"]
     assert not (config.loop.run_dir / "sealed/final").exists()
@@ -346,7 +346,7 @@ def test_flat_local_improvement_becomes_content_addressed_archive(
         benchmark=FakeBenchmark(tmp_path, natural_gain=False),
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
-    assert summary["incumbent_id"] == "seed"
+    assert summary["incumbent_id"] == "baseline"
     assert len(summary["archive_ids"]) == 1
     archive_id = summary["archive_ids"][0]
     manifest = config.loop.run_dir / "component_archive" / archive_id / "manifest.json"

@@ -26,7 +26,7 @@ class BenchmarkAdapter(ABC):
         """Freeze disjoint search/calibration/final pools and return their plan."""
 
     @abstractmethod
-    def seed_source(self) -> Path:
+    def baseline_source(self) -> Path:
         """Return the clean editable agent source tree."""
 
     @abstractmethod

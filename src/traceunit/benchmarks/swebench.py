@@ -62,9 +62,9 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             raise FileNotFoundError(
                 f"WorldCalib SWE-bench runner is missing under {root}"
             )
-        if not self.seed_source().is_dir():
+        if not self.baseline_source().is_dir():
             raise FileNotFoundError(
-                f"mini-SWE-agent source is missing: {self.seed_source()}"
+                f"mini-SWE-agent source is missing: {self.baseline_source()}"
             )
         pool_dir = work_dir / "benchmark_data" / "swebench_verified"
         pool_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +97,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             pools = {
                 name: _representative_order(
                     _load_rows(configured_path),
-                    seed=self.config.split_seed,
+                    seed=self.config.benchmark_seed,
                     namespace=name,
                 )
                 for name, configured_path in configured.items()
@@ -116,7 +116,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
                 )
             pools = _split_rows(
                 rows,
-                seed=self.config.split_seed,
+                seed=self.config.benchmark_seed,
                 search_fraction=self.config.search_fraction,
                 calibration_fraction=self.config.calibration_fraction,
             )
@@ -168,7 +168,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             )
         if self.config.repeats != 1:
             raise RuntimeError(
-                "SWE-bench adapter currently supports repeats=1; repeated seeds "
+                "SWE-bench adapter currently supports repeats=1; repeated evaluations "
                 "must not be requested silently"
             )
         if not os.environ.get(self.config.api_key_env):
@@ -179,9 +179,9 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             if not shutil.which(executable):
                 raise RuntimeError(f"SWE-bench runtime is missing: {executable}")
 
-    def seed_source(self) -> Path:
+    def baseline_source(self) -> Path:
         return (
-            self.config.seed_source_path
+            self.config.baseline_source_path
             or self.config.worldcalib_root / "references/vendor/mini-swe-agent"
         ).resolve()
 

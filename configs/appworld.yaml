@@ -2,7 +2,6 @@ loop:
   run_dir: ../runs/appworld_traceunit
   run_id: appworld_traceunit
   iterations: 5
-  seed: 1729
   resume: true
   max_failure_traces: 8
   max_attempts_per_packet: 4
@@ -13,7 +12,7 @@ protocol:
 benchmark:
   name: appworld
   worldcalib_root: /data/home/yuhan/WorldCalib
-  seed_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
+  baseline_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
   split_manifest_path: /data/home/yuhan/WorldCalib/data/appworld/split_challenge.json
   search_split: train
   heldout_split: test
@@ -21,7 +20,7 @@ benchmark:
   calibration_limit: 30
   calibration_shard_size: 9
   final_limit: 60
-  split_seed: 1729
+  benchmark_seed: 1729
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com
   api_key_env: DEEPSEEK_API_KEY

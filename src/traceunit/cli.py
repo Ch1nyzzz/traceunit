@@ -9,7 +9,9 @@ from traceunit.benchmarks import build_benchmark
 from traceunit.benchmarks.pools import load_benchmark_plan
 from traceunit.config import load_config
 from traceunit.final_evaluation import FinalEvaluationRunner
+from traceunit.io import write_json
 from traceunit.optimizer import OptimizationLoop
+from traceunit.proxy_analysis import analyze_proxy
 from traceunit.store import RunStore
 from traceunit.tests_runtime import load_test_packet, verify_frozen_packet
 
@@ -27,6 +29,24 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--run-dir", type=Path, required=True)
     packet = sub.add_parser("validate-packet")
     packet.add_argument("--bundle", type=Path, required=True)
+    proxy = sub.add_parser("analyze-proxy")
+    proxy.add_argument("--run-dir", type=Path, action="append", required=True)
+    proxy.add_argument("--output", type=Path)
+    proxy.add_argument("--min-train-examples", type=int, default=4)
+    proxy.add_argument("--min-category-support", type=int, default=2)
+    proxy.add_argument("--l2", type=float, default=1.0)
+    proxy.add_argument(
+        "--skip-below",
+        type=float,
+        action="append",
+        dest="selection_thresholds",
+        help=(
+            "proxy probability below which a full natural-task evaluation would be "
+            "skipped; may be repeated"
+        ),
+    )
+    proxy.add_argument("--audit-rate", type=float, default=0.1)
+    proxy.add_argument("--alignment-bins", type=int, default=10)
     return parser
 
 
@@ -48,6 +68,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
+    if args.command == "analyze-proxy":
+        report = analyze_proxy(
+            args.run_dir,
+            min_train_examples=args.min_train_examples,
+            min_category_support=args.min_category_support,
+            l2=args.l2,
+            selection_thresholds=(
+                tuple(args.selection_thresholds)
+                if args.selection_thresholds
+                else (0.1, 0.25, 0.5)
+            ),
+            audit_rate=args.audit_rate,
+            alignment_bins=args.alignment_bins,
+        )
+        if args.output is not None:
+            write_json(args.output, report)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
 
     config = load_config(args.config)
     if args.command == "validate-config":
@@ -62,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "benchmark": adapter.name,
                     "run_dir": str(config.loop.run_dir),
-                    "seed_source": str(adapter.seed_source()),
+                    "baseline_source": str(adapter.baseline_source()),
                     "benchmark_plan_sha256": plan.plan_sha256,
                     "calibration_shards": len(plan.calibration),
                     "status": "prepared",

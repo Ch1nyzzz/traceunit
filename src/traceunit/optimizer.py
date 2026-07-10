@@ -216,34 +216,34 @@ class OptimizationLoop:
                 preflight()
 
     def _initialize_baseline(self) -> RunState:
-        seed_dir = self.store.candidate_dir("seed")
-        source = seed_dir / "source"
+        baseline_dir = self.store.candidate_dir("baseline")
+        source = baseline_dir / "source"
         if not source.exists():
-            copy_source(self.benchmark.seed_source(), source)
+            copy_source(self.benchmark.baseline_source(), source)
         search = self.benchmark.evaluate(
             source=source,
-            candidate_id="seed",
+            candidate_id="baseline",
             pool=self._plan.search,
-            out_dir=self.store.evaluation_dir("seed", self._plan.search.slice_id),
+            out_dir=self.store.evaluation_dir("baseline", self._plan.search.slice_id),
         )
         state = RunState(
             run_id=self.config.loop.run_id or self.store.root.name,
             benchmark=self.benchmark.name,
             status="running",
             next_iteration=1,
-            incumbent_id="seed",
+            incumbent_id="baseline",
             incumbent_source=str(source.resolve()),
             incumbent_search_score=search.score,
             condition=self.config.protocol.condition.value,
             capabilities=asdict(self.config.capabilities),
-            promoted_ids=["seed"],
+            promoted_ids=["baseline"],
             search_cost=search.cost,
             total_cost=search.cost,
         )
         self.store.save_state(state)
         self.store.append_event(
             "baseline_collected",
-            candidate_id="seed",
+            candidate_id="baseline",
             search_score=search.score,
             search_trace_path=search.trace_path,
         )

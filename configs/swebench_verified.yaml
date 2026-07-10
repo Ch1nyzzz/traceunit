@@ -2,7 +2,6 @@ loop:
   run_dir: ../runs/swebench_verified_traceunit
   run_id: swebench_verified_traceunit
   iterations: 5
-  seed: 1729
   resume: true
   max_failure_traces: 8
   max_attempts_per_packet: 4
@@ -13,13 +12,13 @@ protocol:
 benchmark:
   name: swebench_verified
   worldcalib_root: /data/home/yuhan/WorldCalib
-  seed_source_path: /data/home/yuhan/WorldCalib/references/vendor/mini-swe-agent
+  baseline_source_path: /data/home/yuhan/WorldCalib/references/vendor/mini-swe-agent
   search_data_path: /data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json
   search_limit: 50
   calibration_limit: 80
   calibration_shard_size: 20
   final_limit: 100
-  split_seed: 1729
+  benchmark_seed: 1729
   search_fraction: 0.60
   calibration_fraction: 0.20
   model: deepseek-v4-flash

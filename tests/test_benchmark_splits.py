@@ -115,7 +115,7 @@ def test_swebench_prepare_freezes_repo_disjoint_plan_and_strips_private_fields(
         BenchmarkConfig(
             name="swebench_verified",
             worldcalib_root=worldcalib,
-            seed_source_path=seed,
+            baseline_source_path=seed,
             search_data_path=data,
             calibration_shard_size=3,
         )

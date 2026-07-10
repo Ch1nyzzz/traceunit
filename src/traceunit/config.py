@@ -37,7 +37,7 @@ class BenchmarkConfig:
     name: str
     worldcalib_root: Path = Path("../WorldCalib")
     env_file: Path | None = None
-    seed_source_path: Path | None = None
+    baseline_source_path: Path | None = None
     search_data_path: Path | None = None
     calibration_data_path: Path | None = None
     final_data_path: Path | None = None
@@ -62,7 +62,7 @@ class BenchmarkConfig:
     unit_python: Path | None = None
     dataset_name: str = "princeton-nlp/SWE-bench_Verified"
     dataset_split: str = "test"
-    split_seed: int = 1729
+    benchmark_seed: int = 1729
     search_fraction: float = 0.6
     calibration_fraction: float = 0.2
 
@@ -119,7 +119,6 @@ class LoopConfig:
     run_dir: Path
     run_id: str = ""
     iterations: int = 5
-    seed: int = 0
     resume: bool = True
     max_failure_traces: int = 8
     max_attempts_per_packet: int = 4
@@ -221,7 +220,6 @@ def load_config(path: Path) -> ProjectConfig:
         run_dir=_path(base, loop_raw["run_dir"]) or base / "runs/default",
         run_id=str(loop_raw.get("run_id") or ""),
         iterations=max(0, int(loop_raw.get("iterations", 5))),
-        seed=int(loop_raw.get("seed", 0)),
         resume=bool(loop_raw.get("resume", True)),
         max_failure_traces=max(1, int(loop_raw.get("max_failure_traces", 8))),
         max_attempts_per_packet=max(1, int(loop_raw.get("max_attempts_per_packet", 4))),
@@ -240,7 +238,7 @@ def load_config(path: Path) -> ProjectConfig:
         name=str(benchmark_raw["name"]).lower(),
         worldcalib_root=worldcalib_root,
         env_file=env_file,
-        seed_source_path=_path(base, benchmark_raw.get("seed_source_path")),
+        baseline_source_path=_path(base, benchmark_raw.get("baseline_source_path")),
         search_data_path=_path(base, benchmark_raw.get("search_data_path")),
         calibration_data_path=_path(base, benchmark_raw.get("calibration_data_path")),
         final_data_path=_path(base, benchmark_raw.get("final_data_path")),
@@ -269,7 +267,7 @@ def load_config(path: Path) -> ProjectConfig:
             benchmark_raw.get("dataset_name", "princeton-nlp/SWE-bench_Verified")
         ),
         dataset_split=str(benchmark_raw.get("dataset_split", "test")),
-        split_seed=int(benchmark_raw.get("split_seed", 1729)),
+        benchmark_seed=int(benchmark_raw.get("benchmark_seed", 1729)),
         search_fraction=float(benchmark_raw.get("search_fraction", 0.6)),
         calibration_fraction=float(benchmark_raw.get("calibration_fraction", 0.2)),
     )

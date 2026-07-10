@@ -60,13 +60,13 @@ class FinalEvaluationRunner:
             )
         if self.benchmark_plan.final.role is not PoolRole.FINAL:
             raise RuntimeError("benchmark plan does not contain a final pool")
-        seed_source = self.store.root / "candidates" / "seed" / "source"
+        baseline_source = self.store.root / "candidates" / "baseline" / "source"
         subjects = (
             FinalSubject(
-                role="seed",
-                candidate_id="seed",
-                source_path=str(seed_source.resolve()),
-                source_sha256=sha256_tree(seed_source),
+                role="baseline",
+                candidate_id="baseline",
+                source_path=str(baseline_source.resolve()),
+                source_sha256=sha256_tree(baseline_source),
             ),
             FinalSubject(
                 role="terminal",
@@ -119,19 +119,19 @@ class FinalEvaluationRunner:
                 pool=self.benchmark_plan.final,
                 out_dir=self.store.sealed_root / "final" / "evaluations" / subject.role,
             )
-        seed = evaluations["seed"]
+        baseline = evaluations["baseline"]
         terminal = evaluations["terminal"]
-        differences = paired_task_differences(seed, terminal)
+        differences = paired_task_differences(baseline, terminal)
         report = {
             "evaluation_id": plan.evaluation_id,
-            "seed_score": seed.score,
+            "baseline_score": baseline.score,
             "terminal_candidate_id": next(
                 item.candidate_id for item in plan.subjects if item.role == "terminal"
             ),
             "terminal_score": terminal.score,
             "paired_delta": sum(differences) / len(differences) if differences else 0.0,
             "matched_tasks": len(differences),
-            "cost": seed.cost + terminal.cost,
+            "cost": baseline.cost + terminal.cost,
         }
         write_json(self.store.sealed_root / "final" / "report.json", report)
         return report
