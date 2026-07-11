@@ -8,6 +8,20 @@ from traceunit.models import TestPacket
 from traceunit.ontology import prompt_definitions
 
 
+def _live_model_block(target_api_env: str | None) -> str:
+    if not target_api_env:
+        return ""
+    return (
+        "\nYour workspace ships python3 and pytest, and the frozen target model is "
+        "reachable for live experimentation: an OpenAI-compatible endpoint at "
+        "$TRACEUNIT_TARGET_BASE_URL, model $TRACEUNIT_TARGET_MODEL, key in "
+        f"${target_api_env} (the openai python package is installed). Call it freely "
+        "while you work to probe real model behavior; keep experiments small. Frozen "
+        "test cases must stay deterministic or declarative agent_probe JSON - they "
+        "never call the model themselves.\n"
+    )
+
+
 def test_author_prompt(
     *,
     benchmark_context: str,
@@ -18,6 +32,7 @@ def test_author_prompt(
     previous_outcome_path: Path | None = None,
     reflection_output_path: Path | None = None,
     probes_supported: bool = False,
+    target_api_env: str | None = None,
 ) -> str:
     example = {
         "packet_id": "iter001_verification_contract",
@@ -188,6 +203,7 @@ Inputs:
 {memory_guidance} Set packet.primary_family to the selected target hypothesis family. Keep the
 specific mechanism in mechanism, claim, target_boundary, and the tests. Do not put family labels
 on individual cases.
+{_live_model_block(target_api_env)}
 
 Write under {output_dir}:
 - test_packet.json
@@ -226,6 +242,7 @@ def candidate_edit_prompt(
     public_packet_path: Path,
     latent_capabilities_path: Path | None,
     proposal_path: Path,
+    target_api_env: str | None = None,
 ) -> str:
     proposal = {
         "candidate_id": candidate_id,
@@ -265,7 +282,8 @@ Implement one general mechanism-level edit that repairs the frozen public contra
 {latent_guidance}
 Generalize beyond the visible reproducer. Do not inspect hidden tests, search-pool tasks,
 final tasks, evaluators, gold data, or task ids. Run the public test and a syntax/import
-smoke check.
+smoke check before finishing; do not submit an edit whose public test still fails.
+{_live_model_block(target_api_env)}
 
 Write {proposal_path}:
 {json.dumps(proposal, indent=2, ensure_ascii=False)}
@@ -311,6 +329,7 @@ def score_only_edit_prompt(
     trace_manifest: Path,
     history_path: Path,
     proposal_path: Path,
+    target_api_env: str | None = None,
 ) -> str:
     proposal = {
         "candidate_id": candidate_id,
@@ -321,6 +340,7 @@ def score_only_edit_prompt(
         "metadata": {"notes": ""},
     }
     return f"""You are the editor in the score-only Meta-Harness baseline.
+{_live_model_block(target_api_env)}
 
 Benchmark contract:
 {benchmark_context}

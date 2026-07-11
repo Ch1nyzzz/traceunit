@@ -230,6 +230,30 @@ class CandidateEvaluator:
             preservation_passed=all(item.contract_passed for item in preservation),
             metadata=metadata,
         )
+        screening_after = self.config.decision.ut_screening_after
+        if (
+            screening_after > 0
+            and iteration > screening_after
+            and (
+                not contract_passed
+                or regression_loss > self.config.decision.max_regression_loss
+                or not evidence.preservation_passed
+            )
+        ):
+            metadata = dict(evidence.metadata)
+            metadata["ut_screening"] = True
+            evidence = replace(evidence, metadata=metadata)
+            return evidence, DecisionRecord(
+                iteration=iteration,
+                candidate_id=proposal.candidate_id,
+                decision=Decision.REJECT,
+                reason=(
+                    "UT screening: the frozen unit evidence already rejects this "
+                    "candidate, so the paired search evaluation was skipped"
+                ),
+                confidence=1.0,
+                evidence=evidence,
+            )
         candidate_eval = self.evaluate_pool(
             source=candidate_source,
             candidate_id=proposal.candidate_id,

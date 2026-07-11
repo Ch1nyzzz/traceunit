@@ -9,6 +9,7 @@ description = "Trace-conditioned causal proxy tests for self-evolving agents"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "httpx>=0.27",
   "PyYAML>=6.0",
   "python-dotenv>=1.0",
 ]

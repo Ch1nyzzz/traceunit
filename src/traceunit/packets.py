@@ -164,6 +164,7 @@ class PacketAuthor:
                     else None
                 ),
                 probes_supported=self.benchmark.supports_agent_probe,
+                target_api_env=self.config.benchmark.api_key_env,
                 output_dir=output,
             )
             if feedback:

@@ -129,3 +129,29 @@ traceunit final-evaluate --config configs/swebench_verified.yaml
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the normative behavior and
 [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) for the experimental claims and
 ablations.
+
+## Memory benchmarks
+
+TraceUnit now supports `locomo` and `longmemeval` (`lme` is accepted as a
+configuration alias) through WorldCalib's MemGPT-style memory scaffold and
+evaluator:
+
+```bash
+traceunit validate-config --config configs/locomo.yaml
+traceunit prepare --config configs/locomo.yaml
+traceunit optimize --config configs/locomo.yaml
+
+traceunit validate-config --config configs/longmemeval.yaml
+traceunit prepare --config configs/longmemeval.yaml
+traceunit optimize --config configs/longmemeval.yaml
+```
+
+The adapters reuse WorldCalib's canonical loaders, candidate scaffold, LoCoMo
+token-F1 scorer, and LongMemEval LLM judge. TraceUnit still owns pool freezing:
+LoCoMo pools are disjoint by complete conversation/sample, and LongMemEval pools
+are content-hashed before search begins. Candidate code receives a redacted task
+view (no answer, answer-session evidence, task id, or sample id), while gold
+answers remain host-side for scoring. Retrieval hits are preserved as bounded
+trace evidence for the Test Author. The sample configs point at the existing
+`../Optimizer1/data/{locomo,longmemeval}` cache; set `benchmark.data_path` if
+your data lives elsewhere.

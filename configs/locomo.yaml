@@ -1,0 +1,50 @@
+loop:
+  run_dir: ../runs/locomo_traceunit
+  run_id: locomo_traceunit
+  iterations: 20
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: locomo
+  worldcalib_root: /data/home/yuhan/WorldCalib
+  data_path: /data/home/yuhan/Optimizer1/data/locomo/locomo10.json
+  # Split by full dialogue/sample first, then take a balanced 80-question
+  # search subset. No dialogue appears in both the search and final pools.
+  search_fraction: 0.10
+  search_limit: 80
+  final_limit: 300
+  benchmark_seed: 1729
+  memory_top_k: 12
+  memory_window: 1
+  max_context_chars: 6000
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  concurrency: 16
+  repeats: 1
+  timeout_s: 300
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+
+memory:
+  max_world_model_lessons: 64

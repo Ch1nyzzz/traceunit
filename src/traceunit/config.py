@@ -61,6 +61,20 @@ class BenchmarkConfig:
     dataset_split: str = "test"
     benchmark_seed: int = 1729
     search_fraction: float = 0.6
+    # Memory-QA benchmarks (LoCoMo and LongMemEval). ``data_path`` is the
+    # host-only raw dataset location; it is never copied into a candidate
+    # workspace or frozen pool manifest.
+    data_path: Path | None = None
+    dataset_variant: str = "s"
+    memory_question_types: tuple[str, ...] = ()
+    memory_top_k: int = 12
+    memory_window: int = 1
+    max_context_chars: int = 6000
+    use_llm_judge: bool = True
+    judge_model: str = "openai/gpt-oss-120b"
+    judge_base_url: str = "https://api.together.xyz/v1"
+    judge_api_key_env: str = "TOGETHER_API_KEY"
+    judge_timeout_s: int = 300
 
 
 @dataclass(frozen=True)
@@ -68,6 +82,11 @@ class DecisionConfig:
     max_regression_loss: float = 0.0
     min_search_delta: float = 0.0
     noninferiority_margin: float = 0.0
+    # After this many iterations, a candidate that fails its frozen unit
+    # contract (or breaks preservation/regressions) is rejected without a
+    # paired search evaluation. 0 disables screening; the early iterations
+    # are the calibration window that validates the UT-search fit.
+    ut_screening_after: int = 0
 
 
 class ExperimentCondition(StrEnum):
@@ -167,6 +186,20 @@ def _section(raw: Mapping[str, Any], cls: type[Any], name: str) -> dict[str, Any
     return values
 
 
+def _strings(value: Any) -> tuple[str, ...]:
+    """Normalize a YAML scalar/list into a compact tuple of strings."""
+
+    if value in (None, ""):
+        return ()
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        raise ValueError("memory_question_types must be a string or a list of strings")
+    return tuple(str(item).strip() for item in values if str(item).strip())
+
+
 def load_config(path: Path) -> ProjectConfig:
     path = path.resolve()
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -209,8 +242,11 @@ def load_config(path: Path) -> ProjectConfig:
         or (base / "../WorldCalib").resolve()
     )
     env_file = _path(base, benchmark_raw.get("env_file")) or worldcalib_root / ".env"
+    benchmark_name = str(benchmark_raw["name"]).lower()
+    if benchmark_name == "lme":
+        benchmark_name = "longmemeval"
     benchmark = BenchmarkConfig(
-        name=str(benchmark_raw["name"]).lower(),
+        name=benchmark_name,
         worldcalib_root=worldcalib_root,
         env_file=env_file,
         baseline_source_path=_path(base, benchmark_raw.get("baseline_source_path")),
@@ -238,15 +274,36 @@ def load_config(path: Path) -> ProjectConfig:
         dataset_split=str(benchmark_raw.get("dataset_split", "test")),
         benchmark_seed=int(benchmark_raw.get("benchmark_seed", 1729)),
         search_fraction=float(benchmark_raw.get("search_fraction", 0.6)),
+        data_path=_path(base, benchmark_raw.get("data_path")),
+        dataset_variant=str(benchmark_raw.get("dataset_variant", "s")),
+        memory_question_types=_strings(benchmark_raw.get("memory_question_types")),
+        memory_top_k=max(1, int(benchmark_raw.get("memory_top_k", 12))),
+        memory_window=max(0, int(benchmark_raw.get("memory_window", 1))),
+        max_context_chars=max(1, int(benchmark_raw.get("max_context_chars", 6000))),
+        use_llm_judge=bool(benchmark_raw.get("use_llm_judge", True)),
+        judge_model=str(benchmark_raw.get("judge_model", "openai/gpt-oss-120b")),
+        judge_base_url=str(
+            benchmark_raw.get("judge_base_url", "https://api.together.xyz/v1")
+        ),
+        judge_api_key_env=str(benchmark_raw.get("judge_api_key_env", "TOGETHER_API_KEY")),
+        judge_timeout_s=max(1, int(benchmark_raw.get("judge_timeout_s", 300))),
     )
-    if benchmark.name not in {"swebench_verified", "appworld"}:
-        raise ValueError("benchmark.name must be swebench_verified or appworld")
+    if benchmark.name not in {"swebench_verified", "appworld", "locomo", "longmemeval"}:
+        raise ValueError(
+            "benchmark.name must be swebench_verified, appworld, locomo, or longmemeval"
+        )
     if not 0 < benchmark.search_fraction < 1:
         raise ValueError("benchmark.search_fraction must be between 0 and 1")
-    if benchmark.api_key_env not in os.environ and env_file.is_file():
-        secret = dotenv_values(env_file).get(benchmark.api_key_env)
-        if secret:
-            os.environ[benchmark.api_key_env] = str(secret)
+    if env_file.is_file():
+        secrets = dotenv_values(env_file)
+        keys = [benchmark.api_key_env]
+        if benchmark.name == "longmemeval" and benchmark.use_llm_judge:
+            keys.append(benchmark.judge_api_key_env)
+        for key in dict.fromkeys(keys):
+            if key not in os.environ:
+                secret = secrets.get(key)
+                if secret:
+                    os.environ[key] = str(secret)
 
     agents_raw = dict(raw.get("agents") or {})
     _reject_unknown(

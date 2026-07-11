@@ -11,6 +11,17 @@ from traceunit.models import BenchmarkEvaluation, TaskOutcome, TraceEvent, Trace
 
 
 _ARTIFACT_CHAR_LIMIT = 100_000
+_RETRIEVAL_HIT_CHAR_LIMIT = 6_000
+_RETRIEVAL_HIT_LIMIT = 32
+_RETRIEVAL_METADATA_KEYS = {
+    "active_context",
+    "memory_tier",
+    "passage_id",
+    "rank",
+    "search_mode",
+    "source_impl",
+    "turn_index",
+}
 
 _SAFE_TRACE_METRICS = {
     "agent_exit_code",
@@ -19,6 +30,7 @@ _SAFE_TRACE_METRICS = {
     "base_commit",
     "dry_run",
     "duration_s",
+    "evaluation_error",
     "empty_patch",
     "error_tail",
     "eval_exit_code",
@@ -27,13 +39,18 @@ _SAFE_TRACE_METRICS = {
     "exit_status",
     "ground_truth_isolated",
     "infra_error",
+    "judge_completion_tokens",
+    "judge_label",
+    "judge_prompt_tokens",
     "model_stats",
     "patch_bytes",
     "patch_exists",
     "patch_successfully_applied",
+    "question_type",
     "rep_successes",
     "resolved",
     "repo",
+    "scoring_method",
     "returncode",
     "run_returncodes",
     "run_status",
@@ -44,6 +61,48 @@ _SAFE_TRACE_METRICS = {
     "timeout_s",
     "verdict",
 }
+
+
+def _retrieval_event(raw: Mapping[str, object], *, event_id: str) -> TraceEvent | None:
+    """Expose bounded memory-retrieval evidence without exposing gold answers."""
+
+    retrieved = raw.get("retrieved")
+    if not isinstance(retrieved, list):
+        return None
+    documents: list[dict[str, object]] = []
+    for rank, value in enumerate(retrieved[:_RETRIEVAL_HIT_LIMIT], start=1):
+        if not isinstance(value, Mapping):
+            continue
+        hit_metadata = value.get("metadata")
+        metadata = (
+            {
+                str(key): item
+                for key, item in hit_metadata.items()
+                if str(key) in _RETRIEVAL_METADATA_KEYS
+            }
+            if isinstance(hit_metadata, Mapping)
+            else {}
+        )
+        content = str(value.get("text") or "")
+        truncated = len(content) > _RETRIEVAL_HIT_CHAR_LIMIT
+        if truncated:
+            content = content[:_RETRIEVAL_HIT_CHAR_LIMIT] + "..."
+        documents.append(
+            {
+                "rank": rank,
+                "score": value.get("score"),
+                "source": value.get("source"),
+                "content": content,
+                "metadata": metadata,
+                "truncated": truncated,
+            }
+        )
+    return TraceEvent(
+        event_id=event_id,
+        kind="retrieval",
+        input={"query": str(raw.get("question") or "")[:20_000]},
+        output={"documents": documents, "total_returned": len(retrieved)},
+    )
 
 
 @contextmanager
@@ -117,6 +176,9 @@ def normalize_worldcalib_result(
                     )
                 )
                 event_index += 1
+        retrieval_event = _retrieval_event(raw, event_id=f"retrieval-{event_index}")
+        if retrieval_event is not None:
+            events.append(retrieval_event)
         trace_id = f"{benchmark}:{split}:{candidate_id}:{task_id}"
         score = float(raw.get("score") or 0.0)
         passed = bool(raw.get("passed"))

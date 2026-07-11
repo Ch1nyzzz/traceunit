@@ -30,21 +30,21 @@ agents:
   test_author:
     provider: codex
     isolation: docker
-    container_image: node:20-slim
+    container_image: traceunit-agent:latest
     model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 1800
   search:
     provider: codex
     isolation: docker
-    container_image: node:20-slim
+    container_image: traceunit-agent:latest
     model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 3600
   regression_author:
     provider: codex
     isolation: docker
-    container_image: node:20-slim
+    container_image: traceunit-agent:latest
     model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 1800
@@ -53,6 +53,10 @@ agents:
 decision:
   max_regression_loss: 0.0
   min_search_delta: 0.0
+  # Iterations 1-10 are the calibration window: every candidate gets a paired
+  # search evaluation. Afterwards a failed frozen contract rejects the
+  # candidate without the (expensive) search run.
+  ut_screening_after: 10
   # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
   # nondeterministic model, a two-task paired swing is ordinary noise, so the
   # archive band tolerates it; archival is observational and never moves the

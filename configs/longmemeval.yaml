@@ -1,0 +1,58 @@
+loop:
+  run_dir: ../runs/longmemeval_traceunit
+  run_id: longmemeval_traceunit
+  iterations: 20
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: longmemeval
+  worldcalib_root: /data/home/yuhan/WorldCalib
+  data_path: /data/home/yuhan/Optimizer1/data/longmemeval/longmemeval_s_cleaned.json
+  dataset_variant: s
+  # LongMemEval questions are independent clusters. This pilot uses a fixed
+  # 100-question search subset and a disjoint 200-question final subset.
+  search_fraction: 0.25
+  search_limit: 100
+  final_limit: 200
+  benchmark_seed: 1729
+  memory_top_k: 12
+  memory_window: 1
+  max_context_chars: 6000
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  concurrency: 16
+  repeats: 1
+  timeout_s: 300
+  # Reuse WorldCalib's official-style yes/no LLM judge. Point it at the same
+  # endpoint for a single-key setup, or set a separate Together-compatible key.
+  use_llm_judge: true
+  judge_model: deepseek-v4-flash
+  judge_base_url: https://api.deepseek.com/v1
+  judge_api_key_env: DEEPSEEK_API_KEY
+  judge_timeout_s: 300
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+
+memory:
+  max_world_model_lessons: 64

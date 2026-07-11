@@ -30,7 +30,7 @@ agents:
   search:
     provider: codex
     isolation: docker
-    container_image: node:20-slim
+    container_image: traceunit-agent:latest
     model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 3600

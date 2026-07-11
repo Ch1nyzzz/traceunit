@@ -78,6 +78,7 @@ class ScoreOnlyCandidateBuilder:
                     trace_manifest=trace_manifest,
                     history_path=history_path,
                     proposal_path=proposal_path,
+                    target_api_env=self.config.benchmark.api_key_env,
                 ),
                 workspace=candidate_dir,
                 log_dir=iteration_dir / "score_only_editor",

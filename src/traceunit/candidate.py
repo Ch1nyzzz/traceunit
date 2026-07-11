@@ -79,6 +79,7 @@ class CandidateBuilder:
                 public_packet_path=public_path,
                 latent_capabilities_path=latent_path,
                 proposal_path=proposal_path,
+                target_api_env=self.config.benchmark.api_key_env,
             )
             run = self.search_agent.run(
                 role="candidate_editor",

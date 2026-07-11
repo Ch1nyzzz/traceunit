@@ -239,6 +239,27 @@ class SearchAgent:
         return _agent_result(role, log_dir)
 
 
+class BadEditor:
+    """An editor whose change never satisfies the frozen contract."""
+
+    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
+        assert role == "candidate_editor"
+        (workspace / "source/behavior.txt").write_text("still-bad", encoding="utf-8")
+        write_json(
+            workspace / "proposal.json",
+            {
+                "candidate_id": workspace.name,
+                "parent_id": "baseline",
+                "hypothesis_id": "h1",
+                "intervention_kind": "local_repair",
+                "mechanism_claim": "claims to fix behavior but does not",
+                "predicted_effect": "none",
+                "regression_risks": [],
+            },
+        )
+        return _agent_result(role, log_dir)
+
+
 class ScoreOnlyAgent:
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "score_only_editor"
@@ -503,6 +524,34 @@ def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     assert not (store.memory_root / "pending_reflection.json").exists()
+
+
+def test_ut_screening_skips_search_after_calibration(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    from traceunit.config import DecisionConfig
+
+    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
+    config = dc_replace(config, decision=DecisionConfig(ut_screening_after=1))
+    benchmark = FakeBenchmark(tmp_path, natural_gain=False)
+    OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": BadEditor()},
+    ).run()
+
+    # Baseline plus the iter1 calibration window evaluated the search pool;
+    # the screened iter2 did not.
+    assert benchmark.calls.count("search") == 2
+    run = config.loop.run_dir
+    d1 = json.loads((run / "iterations/iter_001/decision.json").read_text())
+    assert d1["decision"] == "reject"
+    assert d1["evidence"]["search_delta"] is not None
+    d2 = json.loads((run / "iterations/iter_002/decision.json").read_text())
+    assert d2["decision"] == "reject"
+    assert "UT screening" in d2["reason"]
+    assert d2["evidence"]["search_delta"] is None
+    assert d2["evidence"]["metadata"]["ut_screening"] is True
 
 
 def test_commit_pending_tolerates_malformed_reflection(tmp_path: Path) -> None:

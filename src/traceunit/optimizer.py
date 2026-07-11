@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -45,16 +46,34 @@ class OptimizationLoop:
         self.store = RunStore(config.loop.run_dir)
         self.benchmark = benchmark or build_benchmark(config.benchmark)
         supplied = dict(agents or {})
+
+        def _with_target_env(agent_config):
+            # Role agents may call the frozen target model for live
+            # experimentation while they work; frozen tests never can.
+            env = {
+                "TRACEUNIT_TARGET_MODEL": config.benchmark.model,
+                "TRACEUNIT_TARGET_BASE_URL": config.benchmark.base_url,
+            }
+            key = os.environ.get(config.benchmark.api_key_env, "")
+            if key:
+                env[config.benchmark.api_key_env] = key
+            return replace(
+                agent_config, environment={**env, **agent_config.environment}
+            )
+
         self.test_author_agent = (
-            supplied.get("test_author") or build_agent(config.agents.test_author)
+            supplied.get("test_author")
+            or build_agent(_with_target_env(config.agents.test_author))
             if config.capabilities.generated_packets
             else None
         )
-        self.search_agent = supplied.get("search") or build_agent(config.agents.search)
+        self.search_agent = supplied.get("search") or build_agent(
+            _with_target_env(config.agents.search)
+        )
         self.regression_author_agent = (
             supplied.get("regression_author")
             or (
-                build_agent(config.agents.regression_author)
+                build_agent(_with_target_env(config.agents.regression_author))
                 if config.agents.regression_author.enabled
                 else None
             )
