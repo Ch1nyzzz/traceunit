@@ -16,14 +16,16 @@ from traceunit.benchmarks.swebench import (
     _augment_miniswe_trajectories,
     _evaluation_cache_fingerprint,
     _finalize_evaluation,
-    _official_eval_identity,
     _representative_order,
     _repo_cluster,
-    _run_official_patch_evaluation,
     _split_rows,
     _validate_disjoint_pools,
 )
 from traceunit.benchmarks.pools import load_pool_items
+from traceunit.benchmarks.swebench_eval_worker import (
+    official_eval_identity as _official_eval_identity,
+    run_official_patch_evaluation as _run_official_patch_evaluation,
+)
 from traceunit.config import BenchmarkConfig, load_config
 from traceunit.io import sha256_file
 from traceunit.models import (
