@@ -1,0 +1,48 @@
+loop:
+  run_dir: ../runs/swebench_scoreonly
+  run_id: swebench_scoreonly
+  iterations: 20
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+
+protocol:
+  condition: c0_score_only
+
+benchmark:
+  name: swebench_verified
+  worldcalib_root: /data/home/yuhan/WorldCalib
+  baseline_source_path: /data/home/yuhan/WorldCalib/references/vendor/mini-swe-agent
+  search_data_path: /data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json
+  search_limit: 50
+  final_limit: 100
+  benchmark_seed: 1729
+  search_fraction: 0.60
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  concurrency: 32
+  timeout_s: 900
+  repeats: 1
+  dry_run: false
+
+agents:
+  search:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+
+decision:
+  max_regression_loss: 0.0
+  min_search_delta: 0.0
+  # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
+  # nondeterministic model, a two-task paired swing is ordinary noise, so the
+  # archive band tolerates it; archival is observational and never moves the
+  # incumbent.
+  noninferiority_margin: 0.04
+
+memory:
+  max_world_model_lessons: 64
