@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from traceunit.agent_probe import run_declarative_probe
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
     load_cached_evaluation,
@@ -35,10 +36,23 @@ _ADAPTER_VERSION = 3
 
 class AppWorldAdapter(BenchmarkAdapter):
     name = "appworld"
+    supports_agent_probe = True
 
     def __init__(self, config: BenchmarkConfig) -> None:
         self.config = config
         self._plan: BenchmarkPlan | None = None
+
+    def run_agent_probe(self, case, bundle, source, subject, output_dir):
+        return run_declarative_probe(
+            case=case,
+            bundle=bundle,
+            source=source,
+            subject=subject,
+            output_dir=output_dir,
+            model=self.config.model,
+            base_url=self.config.base_url,
+            api_key_env=self.config.api_key_env,
+        )
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
         root = self.config.worldcalib_root

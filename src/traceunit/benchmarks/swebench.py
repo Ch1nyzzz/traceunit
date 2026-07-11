@@ -11,19 +11,20 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
+from traceunit.agent_probe import run_declarative_probe
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
     load_cached_evaluation,
     normalize_worldcalib_result,
     worldcalib_import,
 )
-from traceunit.benchmarks.swebench_eval_worker import SWEBENCH_HARNESS_SPEC
 from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
     load_benchmark_plan,
     load_pool_items,
     pool_identity,
 )
+from traceunit.benchmarks.swebench_eval_worker import SWEBENCH_HARNESS_SPEC
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
@@ -46,10 +47,23 @@ _SAFE_TRACE_METRIC_KEYS = {
 
 class SwebenchVerifiedAdapter(BenchmarkAdapter):
     name = "swebench_verified"
+    supports_agent_probe = True
 
     def __init__(self, config: BenchmarkConfig) -> None:
         self.config = config
         self._plan: BenchmarkPlan | None = None
+
+    def run_agent_probe(self, case, bundle, source, subject, output_dir):
+        return run_declarative_probe(
+            case=case,
+            bundle=bundle,
+            source=source,
+            subject=subject,
+            output_dir=output_dir,
+            model=self.config.model,
+            base_url=self.config.base_url,
+            api_key_env=self.config.api_key_env,
+        )
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
         root = self.config.worldcalib_root

@@ -120,9 +120,18 @@ def test_author_prompt(
         else "No online UT-design memory is available in this condition."
     )
     probe_guidance = (
-        "For model-backed capability behavior, write a declarative JSON probe, set "
-        "execution_mode='model_backed_probe' and driver='agent_probe', and declare "
-        "strict max_model_calls and max_tokens."
+        "For capability claims only a live model can witness, add a case with "
+        "execution_mode='model_backed_probe', driver='agent_probe', strict "
+        "max_model_calls and max_tokens (total prompt+completion budget), and point "
+        "path at a declarative JSON file: {\"description\": \"...\", \"messages\": "
+        "[{\"role\": \"system\"|\"user\"|\"assistant\", \"content\": \"...\"}, ...], "
+        "\"expect\": [{\"kind\": \"regex\"|\"contains\", \"pattern\"/\"value\": "
+        "\"...\", \"negate\": false}]}. Message content may inline subject source "
+        "files with {{source_file:relative/path}} so the probe measures the edited "
+        "scaffold rather than the bare model; scripted assistant turns let one live "
+        "completion test multi-turn behavior. The host renders the file, sends one "
+        "temperature-0 completion, and requires every expectation to hold on the "
+        "reply. The messages must end with a user or system turn."
         if probes_supported
         else "This benchmark does not support model-backed probes: every case must "
         "use execution_mode='deterministic'."
