@@ -13,7 +13,7 @@ from traceunit.store import RunStore
 from traceunit.trace_evidence import stage_search_trace_evidence
 from traceunit.tests_runtime import (
     InvalidTestPacket,
-    admission_score,
+    admission_contract,
     freeze_test_packet,
     load_test_packet,
     run_test_cases,
@@ -45,7 +45,7 @@ class PacketAuthor:
         state: RunState,
         iteration: int,
         iteration_dir: Path,
-        alignment_cards_path: Path | None,
+        ut_memory_path: Path | None,
     ) -> tuple[TestPacket, Path, bool]:
         packet_ref = iteration_dir / "packet_ref.json"
         if packet_ref.is_file():
@@ -70,7 +70,7 @@ class PacketAuthor:
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
-            alignment_cards_path=alignment_cards_path,
+            ut_memory_path=ut_memory_path,
         )
         write_json(
             packet_ref,
@@ -100,7 +100,7 @@ class PacketAuthor:
         state: RunState,
         iteration: int,
         iteration_dir: Path,
-        alignment_cards_path: Path | None,
+        ut_memory_path: Path | None,
     ) -> tuple[TestPacket, Path]:
         feedback = ""
         for attempt in range(1, 3):
@@ -119,16 +119,14 @@ class PacketAuthor:
                     destination=workspace / "trace_evidence",
                     max_failure_traces=self.config.loop.max_failure_traces,
                 )
-            cards_copy = workspace / "alignment_cards.json"
-            if alignment_cards_path is not None and not cards_copy.exists():
-                shutil.copy2(alignment_cards_path, cards_copy)
+            memory_copy = workspace / "ut_design_world_model.md"
+            if ut_memory_path is not None and not memory_copy.exists():
+                shutil.copy2(ut_memory_path, memory_copy)
             prompt = test_author_prompt(
                 benchmark_context=self.benchmark.context(),
                 trace_manifest=trace_manifest,
                 incumbent_source=incumbent_copy,
-                alignment_cards_path=(
-                    cards_copy if alignment_cards_path is not None else None
-                ),
+                ut_memory_path=(memory_copy if ut_memory_path is not None else None),
                 output_dir=output,
             )
             if feedback:
@@ -168,19 +166,20 @@ class PacketAuthor:
                 / f"attempt_{attempt}"
                 / "admission",
                 python=self.config.benchmark.unit_python,
+                probe_runner=self.benchmark.run_agent_probe,
             )
-            score, reasons = admission_score(packet, incumbent_results)
+            admitted, reasons = admission_contract(packet, incumbent_results)
             write_json(
                 iteration_dir
                 / "test_author"
                 / f"attempt_{attempt}"
                 / "admission_summary.json",
-                {"score": score, "reasons": reasons},
+                {"passed": admitted, "reasons": reasons},
             )
-            if score < self.config.decision.min_admission_score:
-                feedback = "\n".join(reasons) or f"admission score {score:.3f}"
+            if not admitted:
+                feedback = "\n".join(reasons) or "admission contract failed"
                 continue
-            packet = freeze_test_packet(output, packet, admission_score=score)
+            packet = freeze_test_packet(output, packet, admission_passed=True)
             name = (
                 f"{_safe_name(packet.packet_id)}_v{packet.version}_"
                 f"{packet.content_sha256[:12]}"
@@ -193,7 +192,7 @@ class PacketAuthor:
                 "test_packet_admitted",
                 iteration=iteration,
                 packet_id=frozen.packet_id,
-                admission_score=frozen.admission_score,
+                admission_passed=frozen.admission_passed,
                 path=str(library_path),
             )
             return frozen, library_path

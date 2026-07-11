@@ -22,7 +22,6 @@ from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
     load_benchmark_plan,
     load_pool_items,
-    partition_by_cluster,
 )
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
@@ -72,18 +71,14 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
         if frozen_plan.is_file():
             plan = load_benchmark_plan(frozen_plan)
             self.bind_plan(plan)
-            for pool in (plan.search, *plan.calibration, plan.final):
+            for pool in (plan.search, plan.final):
                 load_pool_items(pool)
             return plan
         configured = {
             "search": self.config.search_data_path,
-            "calibration": self.config.calibration_data_path,
             "final": self.config.final_data_path,
         }
-        has_explicit_heldout = any(
-            configured[name] is not None for name in ("calibration", "final")
-        )
-        if has_explicit_heldout:
+        if configured["final"] is not None:
             missing = [
                 name
                 for name, path in configured.items()
@@ -91,8 +86,8 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             ]
             if missing:
                 raise FileNotFoundError(
-                    "explicit SWE-bench pools require readable search, calibration, "
-                    f"and final files; missing={missing}"
+                    "explicit SWE-bench pools require readable search and final "
+                    f"files; missing={missing}"
                 )
             pools = {
                 name: _representative_order(
@@ -118,12 +113,10 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
                 rows,
                 seed=self.config.benchmark_seed,
                 search_fraction=self.config.search_fraction,
-                calibration_fraction=self.config.calibration_fraction,
             )
 
         limits = {
             "search": self.config.search_limit,
-            "calibration": self.config.calibration_limit,
             "final": self.config.final_limit,
         }
         pools = {
@@ -132,27 +125,13 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
         }
         if not pools["search"] or not pools["final"]:
             raise ValueError("SWE-bench search and final pools must be non-empty")
-        if self.config.calibration_fraction > 0 and not pools["calibration"]:
-            raise ValueError(
-                "SWE-bench calibration pool must be non-empty when calibration is enabled"
-            )
         _validate_disjoint_pools(pools)
-        calibration_shards = partition_by_cluster(
-            pools["calibration"],
-            cluster_key=_repo_cluster,
-            shard_size=self.config.calibration_shard_size,
-        )
         public_search = [_public_row(item, split="search") for item in pools["search"]]
-        public_calibration = [
-            [_public_row(item, split="calibration") for item in shard]
-            for shard in calibration_shards
-        ]
         public_final = [_public_row(item, split="final") for item in pools["final"]]
         self._plan = freeze_benchmark_plan(
             root=pool_dir,
             benchmark=self.name,
             search_items=public_search,
-            calibration_shards=public_calibration,
             final_items=public_final,
             cluster_key=_repo_cluster,
         )
@@ -208,7 +187,7 @@ official SWE-bench harness."""
             )
         if self._plan is None:
             raise RuntimeError("prepare() must be called before evaluate()")
-        known = (self._plan.search, *self._plan.calibration, self._plan.final)
+        known = (self._plan.search, self._plan.final)
         if pool not in known:
             raise ValueError(f"pool is not part of the prepared plan: {pool.slice_id}")
         load_pool_items(pool)
@@ -513,15 +492,11 @@ def _split_rows(
     *,
     seed: int,
     search_fraction: float,
-    calibration_fraction: float,
 ) -> dict[str, list[dict[str, Any]]]:
     if not 0 < search_fraction < 1:
         raise ValueError("search_fraction must be between 0 and 1")
-    if not 0 <= calibration_fraction < 1 or search_fraction + calibration_fraction >= 1:
-        raise ValueError("search_fraction + calibration_fraction must be less than 1")
     pools: dict[str, list[dict[str, Any]]] = {
         "search": [],
-        "calibration": [],
         "final": [],
     }
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -536,16 +511,11 @@ def _split_rows(
         )
         if value < search_fraction:
             pool = "search"
-        elif value < search_fraction + calibration_fraction:
-            pool = "calibration"
         else:
             pool = "final"
         pools[pool].extend(group)
 
-    required = ["search", "final"]
-    if calibration_fraction > 0:
-        required.append("calibration")
-    if len(groups) >= len(required) and any(not pools[name] for name in required):
+    if len(groups) >= 2 and any(not pools[name] for name in ("search", "final")):
         ordered_clusters = sorted(
             groups,
             key=lambda cluster: hashlib.sha256(
@@ -556,25 +526,13 @@ def _split_rows(
         search_count = max(
             1,
             min(
-                cluster_count - len(required) + 1,
+                cluster_count - 1,
                 round(cluster_count * search_fraction),
             ),
         )
-        calibration_count = 0
-        if calibration_fraction > 0:
-            calibration_count = max(
-                1,
-                min(
-                    cluster_count - search_count - 1,
-                    round(cluster_count * calibration_fraction),
-                ),
-            )
         assigned = {
             "search": ordered_clusters[:search_count],
-            "calibration": ordered_clusters[
-                search_count : search_count + calibration_count
-            ],
-            "final": ordered_clusters[search_count + calibration_count :],
+            "final": ordered_clusters[search_count:],
         }
         pools = {
             name: [row for cluster in cluster_ids for row in groups[cluster]]

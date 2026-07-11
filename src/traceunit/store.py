@@ -13,16 +13,13 @@ class RunStore:
         self.root = root.resolve()
         self.state_path = self.root / "run_state.json"
         self.events_path = self.root / "events.jsonl"
-        self.search_attempts_path = self.root / "search_attempts.jsonl"
         self.benchmark_plan_path = self.root / "benchmark_data" / "plan.json"
-        self.calibration_root = self.root / "calibration"
-        self.calibration_observations_path = (
-            self.calibration_root / "private_observations.jsonl"
-        )
-        self.calibration_cards_path = self.calibration_root / "public_cards.json"
-        self.calibration_queue_path = self.calibration_root / "pending.jsonl"
-        self.component_archive_root = self.root / "component_archive"
+        self.ontology_path = self.root / "protocol" / "l0_ontology.json"
+        self.memory_root = self.root / "ut_memory"
+        self.ut_feedback_episodes_path = self.memory_root / "episodes.jsonl"
+        self.ut_world_model_path = self.memory_root / "world_model.md"
         self.packet_store_root = self.root / "frozen_packets"
+        self.latent_root = self.packet_store_root / "latent"
         self.sealed_root = self.root / "sealed"
 
     def initialize(
@@ -37,14 +34,13 @@ class RunStore:
             "candidates",
             "evaluations",
             "sealed",
+            "protocol",
         ]
         enabled = dict(capabilities or {})
         if enabled.get("generated_packets", True):
             names.extend(["test_library", "frozen_packets"])
-        if enabled.get("partial_archive", True):
-            names.append("component_archive")
-        if enabled.get("delayed_alignment", True):
-            names.extend(["calibration", "calibration/checkpoints"])
+        if enabled.get("online_ut_memory", True):
+            names.extend(["ut_memory", "ut_memory/reflections"])
         for name in names:
             (self.root / name).mkdir(exist_ok=True)
         config_path = self.root / "config.snapshot.json"

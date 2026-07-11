@@ -1,0 +1,17 @@
+{
+  "ontology_id": "traceunit-l0-directions",
+  "version": "1.0.0",
+  "families": {
+    "instruction": "Following explicit instructions, constraints, and output contracts.",
+    "context": "Selecting, retaining, compressing, and integrating relevant context.",
+    "planning": "Decomposing, ordering, and revising actions toward the objective.",
+    "retrieval": "Finding and grounding relevant information or code locations.",
+    "tool": "Selecting tools, constructing calls, and consuming their results.",
+    "state": "Tracking entities, environment changes, progress, and intermediate facts.",
+    "verification": "Generating checks, counterexamples, tests, and validating outputs.",
+    "recovery": "Recognizing failures and choosing retries, fallbacks, or replanning.",
+    "termination": "Deciding when and how to stop, submit, or report completion.",
+    "other": "A trace-supported direction outside the frozen L0 vocabulary.",
+    "uncertain": "Evidence is insufficient to distinguish among canonical directions."
+  }
+}

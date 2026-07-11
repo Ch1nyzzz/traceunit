@@ -193,6 +193,11 @@ class ScoreOnlyEvaluator:
                 "violations": [],
                 "candidate_source": str(candidate_source.resolve()),
                 "costs": {"natural_task_tokens": candidate.cost},
+                "search": {
+                    "candidate_score": candidate.score,
+                    "candidate_passrate": candidate.passrate,
+                    "paired_task_count": len(differences),
+                },
             },
         )
         if search_delta > self.config.decision.min_search_delta:

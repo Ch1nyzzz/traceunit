@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -7,10 +8,17 @@ import pytest
 
 import traceunit.tests_runtime as runtime
 from traceunit.io import write_json
+from traceunit.models import (
+    EvidenceRole,
+    TestExecution as ExecutionResult,
+    TestExecutionMode as ExecutionMode,
+    TestTier as Tier,
+)
+from traceunit.ontology import ontology_ref
 from traceunit.tests_runtime import (
     InvalidTestPacket,
     TestSandboxUnavailable as SandboxUnavailable,
-    admission_score,
+    admission_contract,
     freeze_test_packet,
     load_test_packet,
     paired_test_metrics,
@@ -48,44 +56,43 @@ def _write_packet(bundle: Path) -> None:
     cases = [
         {
             "case_id": "public",
-            "family_id": "behavior",
             "tier": "public",
+            "evidence_role": "target_reproducer",
             "path": "tests/public/target.py",
             "expected_incumbent_pass": False,
             "expected_candidate_pass": True,
         },
         {
             "case_id": "hidden",
-            "family_id": "behavior",
             "tier": "hidden",
+            "evidence_role": "structural_sibling",
             "path": "tests/hidden/sibling.py",
             "expected_incumbent_pass": False,
             "expected_candidate_pass": True,
         },
         {
             "case_id": "bridge",
-            "family_id": "behavior",
             "tier": "bridge",
+            "evidence_role": "downstream_bridge",
             "path": "tests/hidden/bridge.py",
             "expected_incumbent_pass": False,
             "expected_candidate_pass": True,
         },
         {
             "case_id": "regression",
-            "family_id": "regression",
             "tier": "regression",
+            "evidence_role": "off_target_control",
             "path": "tests/hidden/regression.py",
             "expected_incumbent_pass": True,
             "expected_candidate_pass": True,
         },
         {
             "case_id": "positive_witness",
-            "family_id": "behavior",
             "tier": "admission",
+            "evidence_role": "positive_witness",
             "path": "tests/hidden/positive_witness.py",
             "expected_incumbent_pass": True,
             "expected_candidate_pass": True,
-            "admission_role": "positive_witness",
         },
     ]
     write_json(
@@ -97,6 +104,8 @@ def _write_packet(bundle: Path) -> None:
             "hypotheses": [
                 {
                     "hypothesis_id": "h1",
+                    "family": "verification",
+                    "intervention_kind": "local_repair",
                     "mechanism": "behavior",
                     "target_boundary": "file",
                     "claim": "behavior becomes good",
@@ -106,6 +115,8 @@ def _write_packet(bundle: Path) -> None:
                 },
                 {
                     "hypothesis_id": "h2",
+                    "family": "context",
+                    "intervention_kind": "orchestration_change",
                     "mechanism": "unrelated file absence",
                     "target_boundary": "file existence",
                     "claim": "the behavior file is missing",
@@ -115,6 +126,7 @@ def _write_packet(bundle: Path) -> None:
                 },
             ],
             "target_hypothesis_id": "h1",
+            "primary_family": "verification",
             "public_contract": "behavior must be good",
             "hidden_variant_strategy": "equivalent sibling",
             "cases": cases,
@@ -144,10 +156,10 @@ def test_admission_freeze_and_paired_metrics(
         subject="incumbent",
         output_dir=tmp_path / "base-results",
     )
-    score, reasons = admission_score(packet, baseline)
-    assert score == 1.0
+    admitted, reasons = admission_contract(packet, baseline)
+    assert admitted is True
     assert reasons == []
-    packet = freeze_test_packet(bundle, packet, admission_score=score)
+    packet = freeze_test_packet(bundle, packet, admission_passed=admitted)
     assert verify_frozen_packet(bundle, packet)
 
     proposed = run_test_cases(
@@ -164,6 +176,106 @@ def test_admission_freeze_and_paired_metrics(
         "bridge_gain": 1.0,
         "regression_loss": 0.0,
     }
+
+
+def test_admitted_packet_is_bound_to_frozen_ontology(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    _write_packet(bundle)
+    proposed = load_test_packet(bundle)
+
+    frozen = freeze_test_packet(bundle, proposed, admission_passed=True)
+
+    assert frozen.metadata["ontology"] == ontology_ref()
+    assert load_test_packet(bundle).metadata["ontology"] == ontology_ref()
+    payload = json.loads((bundle / "test_packet.json").read_text(encoding="utf-8"))
+    payload["metadata"]["ontology"]["version"] = "tampered"
+    write_json(bundle / "test_packet.json", payload)
+    with pytest.raises(InvalidTestPacket, match="unknown L0 ontology"):
+        load_test_packet(bundle)
+
+
+def test_model_probe_is_host_controlled_and_budget_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "bundle"
+    _write_packet(bundle)
+    packet_path = bundle / "test_packet.json"
+    payload = json.loads(packet_path.read_text(encoding="utf-8"))
+    payload["cases"][0].update(
+        {
+            "path": "tests/public/probe.json",
+            "driver": "agent_probe",
+            "execution_mode": "model_backed_probe",
+            "max_model_calls": 2,
+            "max_tokens": 100,
+            "repetitions": 2,
+        }
+    )
+    write_json(bundle / "tests/public/probe.json", {"probe": "counterexample"})
+    write_json(packet_path, payload)
+    packet = load_test_packet(bundle)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "behavior.txt").write_text("bad", encoding="utf-8")
+    calls: list[str] = []
+
+    def probe_runner(
+        case: runtime.TestCaseSpec,
+        test_bundle: Path,
+        subject_source: Path,
+        subject: str,
+        output_dir: Path,
+    ) -> ExecutionResult:
+        assert test_bundle == bundle.resolve()
+        assert subject_source == source.resolve()
+        calls.append(case.case_id)
+        return ExecutionResult(
+            case_id=case.case_id,
+            tier=Tier.PUBLIC,
+            evidence_role=EvidenceRole.TARGET_REPRODUCER,
+            execution_mode=ExecutionMode.MODEL_BACKED_PROBE,
+            subject=subject,
+            passed=True,
+            returncode=0,
+            duration_s=0.1,
+            stdout_path=str(output_dir / "probe.stdout"),
+            stderr_path=str(output_dir / "probe.stderr"),
+            model_calls=2,
+            tokens=90,
+        )
+
+    monkeypatch.setattr(
+        runtime,
+        "_sandbox_backend",
+        lambda: pytest.fail("model-only probe initialized a code sandbox"),
+    )
+    results = run_test_cases(
+        packet=packet,
+        bundle=bundle,
+        source=source,
+        subject="candidate",
+        output_dir=tmp_path / "probe-results",
+        tiers={Tier.PUBLIC},
+        probe_runner=probe_runner,
+    )
+    assert calls == ["public"]
+    assert results[0].model_calls == 2
+    assert results[0].tokens == 90
+
+    def over_budget(*args: object) -> ExecutionResult:
+        result = probe_runner(*args)  # type: ignore[arg-type]
+        return replace(result, tokens=101)
+
+    with pytest.raises(SandboxUnavailable, match="exceeded max_tokens"):
+        run_test_cases(
+            packet=packet,
+            bundle=bundle,
+            source=source,
+            subject="candidate",
+            output_dir=tmp_path / "over-budget-results",
+            tiers={Tier.PUBLIC},
+            probe_runner=over_budget,
+        )
 
 
 def test_packet_rejects_evaluator_access(tmp_path: Path) -> None:
@@ -230,7 +342,7 @@ def test_isolated_snapshot_blocks_source_bundle_mutation_and_env_leaks(
     monkeypatch.setenv("HOST_SECRET", "must-not-leak")
 
     packet = load_test_packet(bundle)
-    packet = freeze_test_packet(bundle, packet, admission_score=1.0)
+    packet = freeze_test_packet(bundle, packet, admission_passed=True)
     results = run_test_cases(
         packet=packet,
         bundle=bundle,
@@ -331,7 +443,7 @@ def test_docker_sandbox_hides_host_and_blocks_mutation(
     (source / "behavior.txt").write_text("bad", encoding="utf-8")
 
     packet = load_test_packet(bundle)
-    packet = freeze_test_packet(bundle, packet, admission_score=1.0)
+    packet = freeze_test_packet(bundle, packet, admission_passed=True)
     monkeypatch.setenv("TRACEUNIT_TEST_SANDBOX_MODE", "docker")
     monkeypatch.setenv("HOST_SECRET", "must-not-leak")
     try:

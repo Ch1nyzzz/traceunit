@@ -6,4 +6,6 @@ __pycache__/
 .venv/
 runs/
 data/
+!src/traceunit/data/
+!src/traceunit/data/l0_ontology.json
 

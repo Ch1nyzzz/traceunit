@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 
 def _json_default(value: Any) -> Any:
@@ -153,13 +153,3 @@ def expand_placeholders(value: str, values: Mapping[str, str]) -> str:
     for key, replacement in values.items():
         result = result.replace("{" + key + "}", replacement)
     return result
-
-
-def select_failed_traces(
-    rows: Iterable[Mapping[str, Any]], limit: int
-) -> list[dict[str, Any]]:
-    failed = [dict(row) for row in rows if not bool(row.get("passed"))]
-    failed.sort(
-        key=lambda row: (float(row.get("score") or 0.0), str(row.get("task_id") or ""))
-    )
-    return failed[:limit] if limit > 0 else failed

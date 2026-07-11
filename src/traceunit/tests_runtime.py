@@ -13,7 +13,7 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from traceunit.io import (
     expand_placeholders,
@@ -24,12 +24,15 @@ from traceunit.io import (
     write_json,
 )
 from traceunit.models import (
+    EvidenceRole,
     TestCaseSpec,
     TestExecution,
+    TestExecutionMode,
     TestPacket,
     TestStatus,
     TestTier,
 )
+from traceunit.ontology import ontology_ref, validate_ontology_ref
 
 
 class InvalidTestPacket(ValueError):
@@ -80,12 +83,35 @@ def load_test_packet(bundle: Path) -> TestPacket:
 
 
 def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
+    claimed_ontology = packet.metadata.get("ontology")
+    if claimed_ontology is not None and not validate_ontology_ref(claimed_ontology):
+        raise InvalidTestPacket("packet claims an unknown L0 ontology version or hash")
+    if packet.status is TestStatus.ADMITTED and not validate_ontology_ref(
+        claimed_ontology
+    ):
+        raise InvalidTestPacket(
+            "admitted packet is not bound to the frozen L0 ontology"
+        )
     regression_only = packet.metadata.get("packet_kind") == "regression"
     hypothesis_ids = {item.hypothesis_id for item in packet.hypotheses}
     if not hypothesis_ids:
         raise InvalidTestPacket("at least one failure hypothesis is required")
     if packet.target_hypothesis_id not in hypothesis_ids:
         raise InvalidTestPacket("target_hypothesis_id is not present in hypotheses")
+    declared_traces = set(packet.source_trace_ids)
+    for hypothesis in packet.hypotheses:
+        if not hypothesis.evidence_trace_ids:
+            raise InvalidTestPacket(
+                f"{hypothesis.hypothesis_id}: evidence_trace_ids must not be empty"
+            )
+        if not set(hypothesis.evidence_trace_ids) <= declared_traces:
+            raise InvalidTestPacket(
+                f"{hypothesis.hypothesis_id}: evidence trace is not declared by packet"
+            )
+        if not 0.0 <= hypothesis.confidence <= 1.0:
+            raise InvalidTestPacket(
+                f"{hypothesis.hypothesis_id}: confidence must be in [0, 1]"
+            )
     if not regression_only:
         if len(hypothesis_ids) < 2:
             raise InvalidTestPacket(
@@ -96,11 +122,19 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             for item in packet.hypotheses
             if item.hypothesis_id == packet.target_hypothesis_id
         )
+        if packet.primary_family is None:
+            raise InvalidTestPacket("normal packet requires primary_family")
+        if target.family is not packet.primary_family:
+            raise InvalidTestPacket(
+                "target hypothesis family must equal packet primary_family"
+            )
         valid_alternatives = set(target.alternatives) & hypothesis_ids
         if not valid_alternatives:
             raise InvalidTestPacket(
                 "target hypothesis must name at least one alternative in the packet"
             )
+    elif packet.primary_family is not None:
+        raise InvalidTestPacket("regression-only packet must not claim primary_family")
     if not packet.cases:
         raise InvalidTestPacket("at least one test case is required")
     ids: set[str] = set()
@@ -112,7 +146,31 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             raise InvalidTestPacket(f"duplicate case_id: {case.case_id}")
         ids.add(case.case_id)
         tiers.add(case.tier)
-        if case.driver not in {"python", "pytest"}:
+        expected_roles = {
+            TestTier.PUBLIC: {EvidenceRole.TARGET_REPRODUCER},
+            TestTier.HIDDEN: {EvidenceRole.STRUCTURAL_SIBLING},
+            TestTier.BRIDGE: {EvidenceRole.DOWNSTREAM_BRIDGE},
+            TestTier.ADMISSION: {EvidenceRole.POSITIVE_WITNESS},
+            TestTier.REGRESSION: {
+                EvidenceRole.PRESERVATION_CONTROL,
+                EvidenceRole.OFF_TARGET_CONTROL,
+            },
+        }
+        if case.evidence_role not in expected_roles[case.tier]:
+            raise InvalidTestPacket(
+                f"{case.case_id}: evidence_role {case.evidence_role.value!r} "
+                f"is invalid for tier {case.tier.value!r}"
+            )
+        if case.execution_mode is TestExecutionMode.MODEL_BACKED_PROBE:
+            if case.driver != "agent_probe":
+                raise InvalidTestPacket(
+                    f"{case.case_id}: model-backed probe requires driver='agent_probe'"
+                )
+            if case.max_model_calls < 1 or case.max_tokens < 1:
+                raise InvalidTestPacket(
+                    f"{case.case_id}: model-backed probe requires positive call/token budgets"
+                )
+        elif case.driver not in {"python", "pytest"}:
             raise InvalidTestPacket(f"unsupported driver {case.driver!r}")
         for key in case.environment:
             upper = key.upper()
@@ -163,22 +221,20 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             "packet must contain at least one public and one hidden test"
         )
     elif not any(
-        case.tier == TestTier.ADMISSION and case.admission_role == "positive_witness"
-        for case in packet.cases
+        case.evidence_role is EvidenceRole.POSITIVE_WITNESS for case in packet.cases
     ):
-        raise InvalidTestPacket(
-            "packet must contain an admission case with admission_role=positive_witness"
-        )
+        raise InvalidTestPacket("packet must contain a positive_witness admission case")
 
 
 def freeze_test_packet(
-    bundle: Path, packet: TestPacket, *, admission_score: float
+    bundle: Path, packet: TestPacket, *, admission_passed: bool
 ) -> TestPacket:
     provisional = replace(
         packet,
         status=TestStatus.ADMITTED,
-        admission_score=admission_score,
+        admission_passed=admission_passed,
         content_sha256="",
+        metadata={**packet.metadata, "ontology": ontology_ref()},
     )
     digest = packet_content_hash(bundle, provisional)
     frozen = replace(provisional, content_sha256=digest)
@@ -217,6 +273,8 @@ def run_test_cases(
     output_dir: Path,
     python: Path | None = None,
     tiers: set[TestTier] | None = None,
+    probe_runner: Callable[[TestCaseSpec, Path, Path, str, Path], TestExecution]
+    | None = None,
 ) -> list[TestExecution]:
     source = source.resolve()
     bundle = bundle.resolve()
@@ -237,11 +295,28 @@ def run_test_cases(
         raise InvalidTestPacket(f"frozen TestPacket hash mismatch: {bundle}")
     source_hash = sha256_tree(source)
     bundle_hash = sha256_tree(bundle)
-    sandbox = _sandbox_backend()
+    selected_cases = tuple(
+        case for case in packet.cases if tiers is None or case.tier in tiers
+    )
+    sandbox = (
+        _sandbox_backend()
+        if any(
+            case.execution_mode is TestExecutionMode.DETERMINISTIC
+            for case in selected_cases
+        )
+        else ""
+    )
     executable = str((python or Path(sys.executable)).absolute())
     results: list[TestExecution] = []
-    for case in packet.cases:
-        if tiers is not None and case.tier not in tiers:
+    for case in selected_cases:
+        if case.execution_mode is TestExecutionMode.MODEL_BACKED_PROBE:
+            if probe_runner is None:
+                raise TestSandboxUnavailable(
+                    f"{case.case_id}: benchmark has no host-controlled agent probe runner"
+                )
+            result = probe_runner(case, bundle, source, subject, output_dir)
+            _validate_probe_result(case, result, subject)
+            results.append(result)
             continue
         results.append(
             _run_case(
@@ -266,6 +341,37 @@ def run_test_cases(
         raise InvalidTestPacket(f"generated tests mutated frozen TestPacket: {bundle}")
     write_json(output_dir / "results.json", [item.to_dict() for item in results])
     return results
+
+
+def _validate_probe_result(
+    case: TestCaseSpec,
+    result: TestExecution,
+    subject: str,
+) -> None:
+    if (
+        result.case_id != case.case_id
+        or result.tier is not case.tier
+        or result.evidence_role is not case.evidence_role
+        or result.execution_mode is not TestExecutionMode.MODEL_BACKED_PROBE
+        or result.subject != subject
+    ):
+        raise TestSandboxUnavailable(
+            f"{case.case_id}: host probe returned mismatched execution identity"
+        )
+    if result.model_calls < 0 or result.tokens < 0:
+        raise TestSandboxUnavailable(
+            f"{case.case_id}: host probe returned negative resource usage"
+        )
+    if result.model_calls > case.max_model_calls:
+        raise TestSandboxUnavailable(
+            f"{case.case_id}: host probe exceeded max_model_calls "
+            f"({result.model_calls} > {case.max_model_calls})"
+        )
+    if result.tokens > case.max_tokens:
+        raise TestSandboxUnavailable(
+            f"{case.case_id}: host probe exceeded max_tokens "
+            f"({result.tokens} > {case.max_tokens})"
+        )
 
 
 def _run_case(
@@ -536,8 +642,9 @@ def _execute_isolated_case(
     )
     return TestExecution(
         case_id=case.case_id,
-        family_id=case.family_id,
         tier=case.tier,
+        evidence_role=case.evidence_role,
+        execution_mode=case.execution_mode,
         subject=subject,
         passed=returncode == 0 and not timed_out,
         returncode=returncode,
@@ -784,12 +891,11 @@ def _timeout_text(value: str | bytes | None) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value
 
 
-def admission_score(
+def admission_contract(
     packet: TestPacket,
     incumbent_results: Iterable[TestExecution],
-) -> tuple[float, list[str]]:
+) -> tuple[bool, list[str]]:
     by_id = {item.case_id: item for item in incumbent_results}
-    matches = 0
     reasons: list[str] = []
     for case in packet.cases:
         result = by_id.get(case.case_id)
@@ -797,16 +903,13 @@ def admission_score(
             reasons.append(f"{case.case_id}: missing result")
             continue
         if result.passed == case.expected_incumbent_pass:
-            matches += 1
+            continue
         else:
             reasons.append(
                 f"{case.case_id}: incumbent passed={result.passed}, "
                 f"expected={case.expected_incumbent_pass}"
             )
-    score = matches / len(packet.cases) if packet.cases else 0.0
-    if reasons:
-        score = 0.0
-    return score, reasons
+    return not reasons, reasons
 
 
 def paired_test_metrics(
@@ -853,12 +956,18 @@ def paired_test_metrics(
 def candidate_contract(
     packet: TestPacket,
     candidate_results: Iterable[TestExecution],
+    *,
+    tiers: frozenset[TestTier] | None = None,
 ) -> tuple[bool, list[str]]:
-    """Fail closed unless every frozen case has its declared candidate outcome."""
+    """Fail closed unless selected frozen cases have their declared outcome."""
 
     by_id = {item.case_id: item for item in candidate_results}
     reasons: list[str] = []
-    for case in packet.cases:
+    for case in (
+        packet.cases
+        if tiers is None
+        else tuple(case for case in packet.cases if case.tier in tiers)
+    ):
         result = by_id.get(case.case_id)
         if result is None:
             reasons.append(f"{case.case_id}: missing candidate result")

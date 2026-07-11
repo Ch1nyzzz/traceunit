@@ -22,7 +22,6 @@ from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
     load_benchmark_plan,
     load_pool_items,
-    partition_by_cluster,
 )
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
@@ -48,12 +47,11 @@ class AppWorldAdapter(BenchmarkAdapter):
         if frozen_plan.is_file():
             plan = load_benchmark_plan(frozen_plan)
             self.bind_plan(plan)
-            for pool in (plan.search, *plan.calibration, plan.final):
+            for pool in (plan.search, plan.final):
                 load_pool_items(pool)
             return plan
         configured = {
             "search": self.config.search_data_path,
-            "calibration": self.config.calibration_data_path,
             "final": self.config.final_data_path,
         }
         if any(path is not None for path in configured.values()):
@@ -64,11 +62,10 @@ class AppWorldAdapter(BenchmarkAdapter):
             ]
             if missing:
                 raise FileNotFoundError(
-                    "explicit AppWorld pools require readable search, calibration, "
-                    f"and final files; missing={missing}"
+                    "explicit AppWorld pools require readable search and final files; "
+                    f"missing={missing}"
                 )
             search = _load_task_ids(configured["search"])
-            calibration = _load_task_ids(configured["calibration"])
             final = _load_task_ids(configured["final"])
         else:
             default_challenge = root / "data/appworld/split_challenge.json"
@@ -85,36 +82,16 @@ class AppWorldAdapter(BenchmarkAdapter):
                 )
             raw = json.loads(source_manifest.read_text(encoding="utf-8"))
             search = list(raw.get(self.config.search_split) or raw.get("train") or [])
-            heldout = list(raw.get(self.config.heldout_split) or raw.get("test") or [])
-            calibration, final = _split_heldout_scenarios(
-                heldout,
-                seed=self.config.benchmark_seed,
-                calibration_fraction=self.config.calibration_fraction,
-            )
+            final = list(raw.get(self.config.heldout_split) or raw.get("test") or [])
         search = _take_scenario_groups(search, self.config.search_limit)
-        calibration = _take_scenario_groups(calibration, self.config.calibration_limit)
         final = _take_scenario_groups(final, self.config.final_limit)
         if not search or not final:
             raise ValueError("AppWorld search and final pools must be non-empty")
-        if self.config.calibration_fraction > 0 and not calibration:
-            raise ValueError(
-                "AppWorld calibration pool must be non-empty when calibration is enabled"
-            )
-        _validate_disjoint_pools(
-            search,
-            calibration,
-            final,
-        )
-        calibration_shards = partition_by_cluster(
-            calibration,
-            cluster_key=_scenario_id,
-            shard_size=self.config.calibration_shard_size,
-        )
+        _validate_disjoint_pools(search, final)
         self._plan = freeze_benchmark_plan(
             root=pool_dir,
             benchmark=self.name,
             search_items=search,
-            calibration_shards=calibration_shards,
             final_items=final,
             cluster_key=_scenario_id,
         )
@@ -168,7 +145,7 @@ sealed process scores the persisted environment state after candidate execution 
         source_hash = sha256_tree(source)
         if self._plan is None:
             raise RuntimeError("prepare() must be called before evaluate()")
-        known = (self._plan.search, *self._plan.calibration, self._plan.final)
+        known = (self._plan.search, self._plan.final)
         if pool not in known:
             raise ValueError(f"pool is not part of the prepared plan: {pool.slice_id}")
         raw_task_ids = load_pool_items(pool)
@@ -200,9 +177,9 @@ sealed process scores the persisted environment state after candidate execution 
             rows = [self._dry_run_row(task_id, rep, out_dir) for task_id, rep in jobs]
         else:
             workers = min(max(1, self.config.concurrency), max(1, len(jobs)))
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 rows = list(
-                    pool.map(
+                    executor.map(
                         lambda item: self._run_one(
                             source=source,
                             candidate_id=candidate_id,
@@ -787,64 +764,22 @@ def _take_scenario_groups(task_ids: list[str], limit: int) -> list[str]:
     return selected
 
 
-def _split_heldout_scenarios(
-    task_ids: list[str],
-    *,
-    seed: int,
-    calibration_fraction: float,
-) -> tuple[list[str], list[str]]:
-    if not 0 <= calibration_fraction < 1:
-        raise ValueError("calibration_fraction must be in [0, 1)")
-    groups: dict[str, list[str]] = {}
-    for task_id in task_ids:
-        groups.setdefault(_scenario_id(task_id), []).append(task_id)
-    ordered = sorted(
-        groups,
-        key=lambda scenario: hashlib.sha256(f"{seed}:{scenario}".encode()).hexdigest(),
-    )
-    if not ordered:
-        return [], []
-    if calibration_fraction == 0:
-        return [], [task for scenario in ordered for task in groups[scenario]]
-    target_calibration = max(1, round(len(task_ids) * calibration_fraction))
-    calibration_groups: list[str] = []
-    count = 0
-    for scenario in ordered[:-1]:
-        if count >= target_calibration and calibration_groups:
-            break
-        calibration_groups.append(scenario)
-        count += len(groups[scenario])
-    final_groups = [
-        scenario for scenario in ordered if scenario not in calibration_groups
-    ]
-    calibration = [task for scenario in calibration_groups for task in groups[scenario]]
-    final = [task for scenario in final_groups for task in groups[scenario]]
-    return calibration, final
-
-
 def _validate_disjoint_pools(
     search: list[str],
-    calibration: list[str],
     final: list[str],
 ) -> None:
     pools = {
         "search": set(search),
-        "calibration": set(calibration),
         "final": set(final),
     }
     for name, values in pools.items():
         source = {
             "search": search,
-            "calibration": calibration,
             "final": final,
         }[name]
         if len(values) != len(source):
             raise ValueError(f"AppWorld {name} pool contains duplicate task ids")
-    pairs = (
-        ("search", "calibration"),
-        ("search", "final"),
-        ("calibration", "final"),
-    )
+    pairs = (("search", "final"),)
     for left, right in pairs:
         overlap = pools[left] & pools[right]
         if overlap:

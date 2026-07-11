@@ -4,44 +4,11 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from traceunit.io import read_json, sha256_file, write_json
 from traceunit.models import BenchmarkPlan, PoolRole, PoolSliceRef
-
-T = TypeVar("T")
-
-
-def partition_by_cluster(
-    items: Sequence[T],
-    *,
-    cluster_key: Callable[[T], str],
-    shard_size: int,
-) -> list[list[T]]:
-    """Partition ordered items without splitting a correlated cluster."""
-
-    if not items:
-        return []
-    if shard_size <= 0:
-        return [list(items)]
-    groups: list[list[T]] = []
-    positions: dict[str, int] = {}
-    for item in items:
-        key = cluster_key(item)
-        if key not in positions:
-            positions[key] = len(groups)
-            groups.append([])
-        groups[positions[key]].append(item)
-    shards: list[list[T]] = []
-    current: list[T] = []
-    for group in groups:
-        if current and len(current) + len(group) > shard_size:
-            shards.append(current)
-            current = []
-        current.extend(group)
-    if current:
-        shards.append(current)
-    return shards
+from traceunit.ontology import ontology_ref
 
 
 def freeze_benchmark_plan(
@@ -49,7 +16,6 @@ def freeze_benchmark_plan(
     root: Path,
     benchmark: str,
     search_items: Sequence[Any],
-    calibration_shards: Sequence[Sequence[Any]],
     final_items: Sequence[Any],
     cluster_key: Callable[[Any], str],
 ) -> BenchmarkPlan:
@@ -84,15 +50,6 @@ def freeze_benchmark_plan(
         ordinal=0,
         items=search_items,
     )
-    calibration = tuple(
-        freeze(
-            slice_id=f"calibration_{index:03d}",
-            role=PoolRole.CALIBRATION,
-            ordinal=index,
-            items=items,
-        )
-        for index, items in enumerate(calibration_shards)
-    )
     final = freeze(
         slice_id="final",
         role=PoolRole.FINAL,
@@ -102,8 +59,8 @@ def freeze_benchmark_plan(
     identity = {
         "benchmark": benchmark,
         "search": _portable_identity(search),
-        "calibration": [_portable_identity(item) for item in calibration],
         "final": _portable_identity(final),
+        "ontology": ontology_ref(),
     }
     plan_sha256 = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -111,9 +68,9 @@ def freeze_benchmark_plan(
     plan = BenchmarkPlan(
         benchmark=benchmark,
         search=search,
-        calibration=calibration,
         final=final,
         plan_sha256=plan_sha256,
+        ontology=ontology_ref(),
     )
     write_json(root / "plan.json", plan.to_dict())
     return plan

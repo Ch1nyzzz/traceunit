@@ -1,7 +1,7 @@
 loop:
   run_dir: ../runs/appworld_traceunit
   run_id: appworld_traceunit
-  iterations: 5
+  iterations: 12
   resume: true
   max_failure_traces: 8
   max_attempts_per_packet: 4
@@ -17,8 +17,6 @@ benchmark:
   search_split: train
   heldout_split: test
   search_limit: 45
-  calibration_limit: 30
-  calibration_shard_size: 9
   final_limit: 60
   benchmark_seed: 1729
   model: deepseek-v4-flash
@@ -50,24 +48,20 @@ agents:
     reasoning_effort: high
     timeout_s: 1800
     enabled: false
+  ut_critic:
+    provider: codex
+    isolation: docker
+    container_image: node:20-slim
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: true
 
 decision:
-  min_admission_score: 0.75
-  min_public_gain: 1.0
-  min_hidden_gain: 0.5
-  min_bridge_gain: 0.5
   max_regression_loss: 0.0
   min_search_delta: 0.0
-  noninferiority_margin: 0.0
+  # One flipped task on a 45-task search pool is ~0.022; a knife-edge margin of
+  # 0.0 would make latent retention require an exactly-zero paired delta.
+  noninferiority_margin: 0.025
 
-alignment:
-  min_candidates_per_checkpoint: 4
-  max_candidates_per_checkpoint: 12
-  min_effective_n: 3.0
-  positive_margin: 0.0
-  trigger_on_new_family: true
-  trigger_on_disagreement: true
-  trigger_on_novel_composition: true
-
-archive:
-  allow_semantic_port: true
+memory:
+  max_world_model_lessons: 64

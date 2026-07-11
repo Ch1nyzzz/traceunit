@@ -6,13 +6,12 @@ from typing import Iterable
 
 from traceunit.agents.prompts import regression_author_prompt
 from traceunit.agents.runner import WorkspaceAgent
-from traceunit.archive import ArchiveCatalog, CompositionPlan, FrozenPacketRef
 from traceunit.benchmarks.base import BenchmarkAdapter
-from traceunit.composition import CertificateReplayer, ReplayResult
 from traceunit.config import ProjectConfig
 from traceunit.decision import DecisionPolicy
 from traceunit.io import copy_source, read_json, write_json
 from traceunit.models import (
+    AttributionScope,
     BenchmarkEvaluation,
     BenchmarkPlan,
     CandidateProposal,
@@ -23,12 +22,14 @@ from traceunit.models import (
     RunState,
     TestPacket,
     TestTier,
+    UnitFamily,
 )
 from traceunit.paired import paired_task_differences
+from traceunit.replay import FrozenPacketRef, PacketReplayer, PacketReplayResult
 from traceunit.store import RunStore
 from traceunit.tests_runtime import (
     InvalidTestPacket,
-    admission_score,
+    admission_contract,
     candidate_contract,
     load_test_packet,
     paired_test_metrics,
@@ -61,8 +62,6 @@ class CandidateEvaluator:
         iteration: int,
         iteration_dir: Path,
         proposal: CandidateProposal,
-        composition: CompositionPlan,
-        catalog: ArchiveCatalog,
         packet: TestPacket,
         packet_path: Path,
         candidate_source: Path,
@@ -81,12 +80,11 @@ class CandidateEvaluator:
             "candidate_source": str(candidate_source.resolve()),
             "packet_reused": packet_reused,
             "has_bridge": any(case.tier is TestTier.BRIDGE for case in packet.cases),
-            "family_keys": sorted({case.family_id for case in packet.cases}),
-            "composition_ids": list(composition.component_ids),
-            "composition_signature": composition.attempt_fingerprint,
             "violations": violations,
             "costs": {
                 "unit_test_wall_seconds": 0.0,
+                "model_probe_calls": 0,
+                "model_probe_tokens": 0,
                 "natural_task_tokens": 0.0,
             },
         }
@@ -99,8 +97,10 @@ class CandidateEvaluator:
                 hidden_gain=0.0,
                 bridge_gain=0.0,
                 regression_loss=1.0,
-                admission_score=packet.admission_score,
-                archive_replay_passed=False,
+                contract_passed=False,
+                bridge_contract_passed=False,
+                primary_family=packet.primary_family,
+                intervention_kind=proposal.intervention_kind,
                 preservation_passed=False,
                 metadata=metadata,
             )
@@ -121,6 +121,7 @@ class CandidateEvaluator:
             subject="incumbent",
             output_dir=pair_dir / "incumbent",
             python=self.config.benchmark.unit_python,
+            probe_runner=self.benchmark.run_agent_probe,
         )
         candidate_results = run_test_cases(
             packet=packet,
@@ -129,14 +130,22 @@ class CandidateEvaluator:
             subject="candidate",
             output_dir=pair_dir / "candidate",
             python=self.config.benchmark.unit_python,
+            probe_runner=self.benchmark.run_agent_probe,
         )
         metrics = paired_test_metrics(packet, incumbent_results, candidate_results)
         contract_passed, contract_reasons = candidate_contract(
             packet, candidate_results
         )
+        has_bridge = bool(metadata["has_bridge"])
+        bridge_contract_passed, bridge_contract_reasons = candidate_contract(
+            packet,
+            candidate_results,
+            tiers=frozenset({TestTier.BRIDGE}),
+        )
+        if not has_bridge:
+            bridge_contract_passed = False
         regression_loss = max(
             metrics["regression_loss"],
-            0.0 if contract_passed else 1.0,
             self._regression_loss(
                 iteration_dir=iteration_dir,
                 state=state,
@@ -145,11 +154,6 @@ class CandidateEvaluator:
                 diff_text=diff_text,
             ),
         )
-        archive_replay = self._replay(
-            refs=composition.frozen_packet_refs(catalog),
-            candidate_source=candidate_source,
-            output_dir=iteration_dir / "archive_replay",
-        )
         preservation = self._replay(
             refs=(
                 FrozenPacketRef.from_dict(item) for item in state.preserved_packet_refs
@@ -157,15 +161,43 @@ class CandidateEvaluator:
             candidate_source=candidate_source,
             output_dir=iteration_dir / "preservation_replay",
         )
+        latent = self._replay(
+            refs=(
+                FrozenPacketRef.from_dict(item) for item in state.latent_packet_refs
+            ),
+            candidate_source=candidate_source,
+            output_dir=iteration_dir / "latent_replay",
+        )
+        realized = tuple(
+            result.content_sha256 for result in latent if result.contract_passed
+        )
+        component_families = tuple(
+            sorted(
+                {
+                    UnitFamily(result.primary_family)
+                    for result in latent
+                    if result.contract_passed and result.primary_family
+                },
+                key=lambda item: item.value,
+            )
+        )
         unit_seconds = sum(
             result.duration_s for result in [*incumbent_results, *candidate_results]
+        )
+        probe_calls = sum(
+            result.model_calls for result in [*incumbent_results, *candidate_results]
+        )
+        probe_tokens = sum(
+            result.tokens for result in [*incumbent_results, *candidate_results]
         )
         metadata.update(
             {
                 "candidate_contract_passed": contract_passed,
                 "candidate_contract_reasons": contract_reasons,
-                "archive_replay": archive_replay.to_dict(),
-                "preservation_replay": preservation.to_dict(),
+                "bridge_contract_passed": bridge_contract_passed,
+                "bridge_contract_reasons": bridge_contract_reasons,
+                "preservation_replay": [item.to_dict() for item in preservation],
+                "latent_replay": [item.to_dict() for item in latent],
                 "incumbent_test_results": [
                     result.to_dict() for result in incumbent_results
                 ],
@@ -174,6 +206,8 @@ class CandidateEvaluator:
                 ],
                 "costs": {
                     "unit_test_wall_seconds": unit_seconds,
+                    "model_probe_calls": probe_calls,
+                    "model_probe_tokens": probe_tokens,
                     "natural_task_tokens": 0.0,
                 },
             }
@@ -186,34 +220,44 @@ class CandidateEvaluator:
             hidden_gain=metrics["hidden_gain"],
             bridge_gain=metrics["bridge_gain"],
             regression_loss=regression_loss,
-            admission_score=packet.admission_score,
-            archive_replay_passed=archive_replay.passed,
-            preservation_passed=preservation.passed,
+            contract_passed=contract_passed,
+            bridge_contract_passed=bridge_contract_passed,
+            primary_family=packet.primary_family,
+            intervention_kind=proposal.intervention_kind,
+            attribution_scope=(
+                AttributionScope.COMPOSITION if realized else AttributionScope.ATOMIC
+            ),
+            component_families=component_families,
+            realized_latent=realized,
+            preservation_passed=all(item.contract_passed for item in preservation),
+            metadata=metadata,
+        )
+        candidate_eval = self.evaluate_pool(
+            source=candidate_source,
+            candidate_id=proposal.candidate_id,
+            pool=self.plan.search,
+        )
+        differences = self._search_differences(
+            parent_id=state.incumbent_id,
+            candidate=candidate_eval,
+        )
+        search_delta = sum(differences) / len(differences) if differences else 0.0
+        metadata = dict(evidence.metadata)
+        costs = dict(metadata["costs"])
+        costs["natural_task_tokens"] = candidate_eval.cost
+        metadata["costs"] = costs
+        metadata["search"] = {
+            "candidate_score": candidate_eval.score,
+            "candidate_passrate": candidate_eval.passrate,
+            "paired_task_count": len(differences),
+        }
+        evidence = replace(
+            evidence,
+            search_delta=search_delta,
+            total_cost=candidate_eval.cost,
             metadata=metadata,
         )
         decision = self.policy.decide(evidence)
-        if decision.decision is Decision.EVALUATE_SEARCH:
-            candidate_eval = self.evaluate_pool(
-                source=candidate_source,
-                candidate_id=proposal.candidate_id,
-                pool=self.plan.search,
-            )
-            differences = self._search_differences(
-                parent_id=state.incumbent_id,
-                candidate=candidate_eval,
-            )
-            search_delta = sum(differences) / len(differences) if differences else 0.0
-            metadata = dict(evidence.metadata)
-            costs = dict(metadata["costs"])
-            costs["natural_task_tokens"] = candidate_eval.cost
-            metadata["costs"] = costs
-            evidence = replace(
-                evidence,
-                search_delta=search_delta,
-                total_cost=candidate_eval.cost,
-                metadata=metadata,
-            )
-            decision = self.policy.decide(evidence)
         if (
             decision.decision is Decision.ARCHIVE
             and not self.config.capabilities.partial_archive
@@ -260,10 +304,11 @@ class CandidateEvaluator:
         refs: Iterable[FrozenPacketRef],
         candidate_source: Path,
         output_dir: Path,
-    ) -> ReplayResult:
-        return CertificateReplayer(
-            archive_root=self.store.packet_store_root,
+    ) -> tuple[PacketReplayResult, ...]:
+        return PacketReplayer(
+            packet_root=self.store.packet_store_root,
             python=self.config.benchmark.unit_python,
+            probe_runner=self.benchmark.run_agent_probe,
         ).replay(
             refs=refs,
             candidate_source=candidate_source,
@@ -319,8 +364,8 @@ class CandidateEvaluator:
             output_dir=iteration_dir / "regression_author" / "incumbent",
             python=self.config.benchmark.unit_python,
         )
-        score, _ = admission_score(packet, incumbent_results)
-        if score < self.config.decision.min_admission_score:
+        admitted, _ = admission_contract(packet, incumbent_results)
+        if not admitted:
             return 1.0
         candidate_results = run_test_cases(
             packet=packet,

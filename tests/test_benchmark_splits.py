@@ -10,7 +10,6 @@ import pytest
 from traceunit.benchmarks.appworld import (
     AppWorldAdapter,
     _sandboxed_appworld_command,
-    _split_heldout_scenarios,
 )
 from traceunit.benchmarks.swebench import (
     SwebenchVerifiedAdapter,
@@ -44,18 +43,15 @@ def test_swebench_split_is_stable_and_disjoint() -> None:
         for repository in range(20)
         for index in range(3)
     ]
-    first = _split_rows(rows, seed=7, search_fraction=0.6, calibration_fraction=0.2)
+    first = _split_rows(rows, seed=7, search_fraction=0.6)
     second = _split_rows(
         list(reversed(rows)),
         seed=7,
         search_fraction=0.6,
-        calibration_fraction=0.2,
     )
     assert first == second
     ids = [{row["instance_id"] for row in first[name]} for name in first]
     assert not ids[0] & ids[1]
-    assert not ids[0] & ids[2]
-    assert not ids[1] & ids[2]
     assert set.union(*ids) == {row["instance_id"] for row in rows}
     cluster_owners: dict[str, str] = {}
     for name, items in first.items():
@@ -83,8 +79,7 @@ def test_swebench_rejects_overlapping_explicit_pools() -> None:
         _validate_disjoint_pools(
             {
                 "search": [{"instance_id": "org__issue-1", "repo": "org/repo"}],
-                "calibration": [{"instance_id": "org__issue-1", "repo": "org/repo"}],
-                "final": [],
+                "final": [{"instance_id": "org__issue-1", "repo": "org/repo"}],
             }
         )
 
@@ -117,15 +112,13 @@ def test_swebench_prepare_freezes_repo_disjoint_plan_and_strips_private_fields(
             worldcalib_root=worldcalib,
             baseline_source_path=seed,
             search_data_path=data,
-            calibration_shard_size=3,
         )
     )
     run = tmp_path / "run"
     plan = adapter.prepare(run)
     assert plan == adapter._plan
     assert (run / "benchmark_data/swebench_verified/plan.json").is_file()
-    refs = (plan.search, *plan.calibration, plan.final)
-    assert plan.calibration
+    refs = (plan.search, plan.final)
     seen_clusters: set[str] = set()
     seen_instances: set[str] = set()
     for ref in refs:
@@ -174,8 +167,8 @@ def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
     different_slice, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
         pool=PoolSliceRef(
-            slice_id="calibration_000",
-            role=PoolRole.CALIBRATION,
+            slice_id="final",
+            role=PoolRole.FINAL,
             manifest_path=str(pool),
             manifest_sha256=pool_ref.manifest_sha256,
             cluster_ids=pool_ref.cluster_ids,
@@ -476,23 +469,7 @@ def test_swebench_finalize_evaluation_preserves_task_status_and_usage() -> None:
     assert finalized.metadata["task_status_counts"] == {"agent_timeout": 1}
 
 
-def test_appworld_calibration_and_final_are_scenario_disjoint() -> None:
-    tasks = [
-        f"scenario_{scenario}_{variant}"
-        for scenario in range(10)
-        for variant in (1, 2, 3)
-    ]
-    calibration, final = _split_heldout_scenarios(
-        tasks, seed=11, calibration_fraction=0.2
-    )
-    calibration_scenarios = {task.rsplit("_", 1)[0] for task in calibration}
-    final_scenarios = {task.rsplit("_", 1)[0] for task in final}
-    assert calibration_scenarios
-    assert final_scenarios
-    assert not calibration_scenarios & final_scenarios
-
-
-def test_appworld_prepare_freezes_scenario_disjoint_calibration_shards(
+def test_appworld_prepare_freezes_scenario_disjoint_search_and_final_pools(
     tmp_path: Path,
 ) -> None:
     worldcalib = tmp_path / "worldcalib"
@@ -519,15 +496,13 @@ def test_appworld_prepare_freezes_scenario_disjoint_calibration_shards(
             name="appworld",
             worldcalib_root=worldcalib,
             split_manifest_path=manifest,
-            calibration_shard_size=4,
         )
     )
 
     plan = adapter.prepare(tmp_path / "run")
 
     assert (tmp_path / "run/benchmark_data/appworld/plan.json").is_file()
-    assert len(plan.calibration) >= 2
-    refs = (plan.search, *plan.calibration, plan.final)
+    refs = (plan.search, plan.final)
     scenario_owner: dict[str, str] = {}
     task_ids: set[str] = set()
     for ref in refs:

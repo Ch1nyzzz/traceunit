@@ -30,6 +30,7 @@ class AgentsConfig:
     regression_author: AgentConfig = field(
         default_factory=lambda: AgentConfig(enabled=False)
     )
+    ut_critic: AgentConfig = field(default_factory=lambda: AgentConfig(enabled=False))
 
 
 @dataclass(frozen=True)
@@ -39,15 +40,12 @@ class BenchmarkConfig:
     env_file: Path | None = None
     baseline_source_path: Path | None = None
     search_data_path: Path | None = None
-    calibration_data_path: Path | None = None
     final_data_path: Path | None = None
     split_manifest_path: Path | None = None
     search_split: str = "train"
     heldout_split: str = "test"
     search_limit: int = 0
-    calibration_limit: int = 0
     final_limit: int = 0
-    calibration_shard_size: int = 0
     dry_run: bool = False
     force: bool = False
     model: str = "deepseek-v4-flash"
@@ -64,15 +62,10 @@ class BenchmarkConfig:
     dataset_split: str = "test"
     benchmark_seed: int = 1729
     search_fraction: float = 0.6
-    calibration_fraction: float = 0.2
 
 
 @dataclass(frozen=True)
 class DecisionConfig:
-    min_admission_score: float = 0.6
-    min_public_gain: float = 0.5
-    min_hidden_gain: float = 0.5
-    min_bridge_gain: float = 0.5
     max_regression_loss: float = 0.0
     min_search_delta: float = 0.0
     noninferiority_margin: float = 0.0
@@ -90,7 +83,7 @@ class ConditionCapabilities:
     generated_packets: bool
     unit_gate: bool
     partial_archive: bool
-    delayed_alignment: bool
+    online_ut_memory: bool
 
 
 @dataclass(frozen=True)
@@ -99,19 +92,10 @@ class ProtocolConfig:
 
 
 @dataclass(frozen=True)
-class AlignmentConfig:
-    min_candidates_per_checkpoint: int = 4
-    max_candidates_per_checkpoint: int = 12
-    min_effective_n: float = 3.0
-    positive_margin: float = 0.0
-    trigger_on_new_family: bool = True
-    trigger_on_disagreement: bool = True
-    trigger_on_novel_composition: bool = True
+class MemoryConfig:
+    """Bound the small, online UT-design memory exposed to later authors."""
 
-
-@dataclass(frozen=True)
-class ArchiveConfig:
-    allow_semantic_port: bool = True
+    max_world_model_lessons: int = 64
 
 
 @dataclass(frozen=True)
@@ -133,8 +117,7 @@ class ProjectConfig:
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
-    alignment: AlignmentConfig = field(default_factory=AlignmentConfig)
-    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @property
     def capabilities(self) -> ConditionCapabilities:
@@ -144,7 +127,7 @@ class ProjectConfig:
             unit_gate=condition is not ExperimentCondition.SCORE_ONLY,
             partial_archive=condition
             in {ExperimentCondition.ARCHIVE, ExperimentCondition.FULL},
-            delayed_alignment=condition is ExperimentCondition.FULL,
+            online_ut_memory=condition is ExperimentCondition.FULL,
         )
 
 
@@ -200,8 +183,7 @@ def load_config(path: Path) -> ProjectConfig:
             "protocol",
             "agents",
             "decision",
-            "alignment",
-            "archive",
+            "memory",
         },
         "root",
     )
@@ -240,17 +222,12 @@ def load_config(path: Path) -> ProjectConfig:
         env_file=env_file,
         baseline_source_path=_path(base, benchmark_raw.get("baseline_source_path")),
         search_data_path=_path(base, benchmark_raw.get("search_data_path")),
-        calibration_data_path=_path(base, benchmark_raw.get("calibration_data_path")),
         final_data_path=_path(base, benchmark_raw.get("final_data_path")),
         split_manifest_path=_path(base, benchmark_raw.get("split_manifest_path")),
         search_split=str(benchmark_raw.get("search_split", "train")),
         heldout_split=str(benchmark_raw.get("heldout_split", "test")),
         search_limit=max(0, int(benchmark_raw.get("search_limit", 0))),
-        calibration_limit=max(0, int(benchmark_raw.get("calibration_limit", 0))),
         final_limit=max(0, int(benchmark_raw.get("final_limit", 0))),
-        calibration_shard_size=max(
-            0, int(benchmark_raw.get("calibration_shard_size", 0))
-        ),
         dry_run=bool(benchmark_raw.get("dry_run", False)),
         force=bool(benchmark_raw.get("force", False)),
         model=str(benchmark_raw.get("model", "deepseek-v4-flash")),
@@ -269,18 +246,11 @@ def load_config(path: Path) -> ProjectConfig:
         dataset_split=str(benchmark_raw.get("dataset_split", "test")),
         benchmark_seed=int(benchmark_raw.get("benchmark_seed", 1729)),
         search_fraction=float(benchmark_raw.get("search_fraction", 0.6)),
-        calibration_fraction=float(benchmark_raw.get("calibration_fraction", 0.2)),
     )
     if benchmark.name not in {"swebench_verified", "appworld"}:
         raise ValueError("benchmark.name must be swebench_verified or appworld")
     if not 0 < benchmark.search_fraction < 1:
         raise ValueError("benchmark.search_fraction must be between 0 and 1")
-    if not 0 <= benchmark.calibration_fraction < 1:
-        raise ValueError("benchmark.calibration_fraction must be in [0, 1)")
-    if benchmark.search_fraction + benchmark.calibration_fraction >= 1:
-        raise ValueError(
-            "benchmark.search_fraction + calibration_fraction must be less than 1"
-        )
     if benchmark.api_key_env not in os.environ and env_file.is_file():
         secret = dotenv_values(env_file).get(benchmark.api_key_env)
         if secret:
@@ -288,7 +258,9 @@ def load_config(path: Path) -> ProjectConfig:
 
     agents_raw = dict(raw.get("agents") or {})
     _reject_unknown(
-        agents_raw, {"test_author", "search", "regression_author"}, "agents"
+        agents_raw,
+        {"test_author", "search", "regression_author", "ut_critic"},
+        "agents",
     )
     default_agent = AgentConfig()
     agents = AgentsConfig(
@@ -297,11 +269,13 @@ def load_config(path: Path) -> ProjectConfig:
         regression_author=_agent(
             agents_raw.get("regression_author"), AgentConfig(enabled=False)
         ),
+        ut_critic=_agent(agents_raw.get("ut_critic"), AgentConfig(enabled=False)),
     )
     for role, agent in (
         ("test_author", agents.test_author),
         ("search", agents.search),
         ("regression_author", agents.regression_author),
+        ("ut_critic", agents.ut_critic),
     ):
         if agent.isolation not in {"docker", "none", "external"}:
             raise ValueError(
@@ -311,10 +285,7 @@ def load_config(path: Path) -> ProjectConfig:
     decision_values = _section(
         dict(raw.get("decision") or {}), DecisionConfig, "decision"
     )
-    alignment_values = _section(
-        dict(raw.get("alignment") or {}), AlignmentConfig, "alignment"
-    )
-    archive_values = _section(dict(raw.get("archive") or {}), ArchiveConfig, "archive")
+    memory_values = _section(dict(raw.get("memory") or {}), MemoryConfig, "memory")
     protocol_values = _section(
         dict(raw.get("protocol") or {}), ProtocolConfig, "protocol"
     )
@@ -328,30 +299,17 @@ def load_config(path: Path) -> ProjectConfig:
         allowed = ", ".join(item.value for item in ExperimentCondition)
         raise ValueError(f"protocol.condition must be one of: {allowed}") from exc
     decision = DecisionConfig(**decision_values)
-    alignment = AlignmentConfig(**alignment_values)
-    archive = ArchiveConfig(**archive_values)
+    memory = MemoryConfig(**memory_values)
     for name, value in decision.__dict__.items():
         if float(value) < 0:
             raise ValueError(f"decision.{name} must be nonnegative")
-    if alignment.min_candidates_per_checkpoint < 1:
-        raise ValueError("alignment.min_candidates_per_checkpoint must be positive")
-    if (
-        alignment.max_candidates_per_checkpoint
-        < alignment.min_candidates_per_checkpoint
-    ):
-        raise ValueError(
-            "alignment.max_candidates_per_checkpoint must be >= the minimum"
-        )
-    if alignment.min_effective_n < 0:
-        raise ValueError("alignment.min_effective_n must be nonnegative")
-    if alignment.positive_margin < 0:
-        raise ValueError("alignment.positive_margin must be nonnegative")
+    if memory.max_world_model_lessons < 1:
+        raise ValueError("memory.max_world_model_lessons must be positive")
     return ProjectConfig(
         loop=loop,
         benchmark=benchmark,
         protocol=protocol,
         agents=agents,
         decision=decision,
-        alignment=alignment,
-        archive=archive,
+        memory=memory,
     )

@@ -9,7 +9,7 @@ from traceunit.benchmarks.pools import freeze_benchmark_plan, load_pool_items
 from traceunit.config import (
     AgentConfig,
     AgentsConfig,
-    AlignmentConfig,
+    MemoryConfig,
     BenchmarkConfig,
     LoopConfig,
     ExperimentCondition,
@@ -17,7 +17,7 @@ from traceunit.config import (
     ProtocolConfig,
 )
 from traceunit.final_evaluation import FinalEvaluationRunner
-from traceunit.io import read_json, sha256_tree, write_json
+from traceunit.io import read_json, write_json
 from traceunit.models import (
     BenchmarkEvaluation,
     BenchmarkPlan,
@@ -45,7 +45,6 @@ class FakeBenchmark(BenchmarkAdapter):
             root=work_dir / "benchmark_data" / "fake",
             benchmark=self.name,
             search_items=["search-task"],
-            calibration_shards=[["calibration-task"]],
             final_items=["final-task"],
             cluster_key=str,
         )
@@ -157,6 +156,8 @@ class TestAuthor:
                 "hypotheses": [
                     {
                         "hypothesis_id": "h1",
+                        "family": "verification",
+                        "intervention_kind": "local_repair",
                         "mechanism": "behavior",
                         "target_boundary": "behavior file",
                         "claim": "candidate changes bad to good",
@@ -166,6 +167,8 @@ class TestAuthor:
                     },
                     {
                         "hypothesis_id": "h2",
+                        "family": "context",
+                        "intervention_kind": "orchestration_change",
                         "mechanism": "missing file",
                         "target_boundary": "behavior file existence",
                         "claim": "the behavior file is absent",
@@ -175,6 +178,7 @@ class TestAuthor:
                     },
                 ],
                 "target_hypothesis_id": "h1",
+                "primary_family": "verification",
                 "public_contract": "behavior must be good",
                 "hidden_variant_strategy": "same mechanism with a structural variant",
                 "cases": [
@@ -191,7 +195,6 @@ class TestAuthor:
                             "tests/hidden/positive_witness.py",
                             True,
                         ),
-                        "admission_role": "positive_witness",
                     },
                 ],
                 "metadata": {},
@@ -201,35 +204,25 @@ class TestAuthor:
 
 
 class SearchAgent:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
-        if role == "search_planner":
-            write_json(
-                workspace / "composition_plan.json",
-                {
-                    "schema_version": 1,
-                    "base_source_sha256": sha256_tree(workspace / "parent_source"),
-                    "selections": [],
-                    "integration_instructions": "change behavior from bad to good",
-                },
-            )
-        elif role == "candidate_editor":
-            (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
-            plan = read_json(workspace / "composition_plan.json")
-            write_json(
-                workspace / "proposal.json",
-                {
-                    "candidate_id": "iter001_candidate",
-                    "parent_id": "baseline",
-                    "hypothesis_id": "h1",
-                    "mechanism_claim": "change behavior from bad to good",
-                    "predicted_effect": "unit and search score improve",
-                    "regression_risks": [],
-                    "plan_id": plan["attempt_fingerprint"],
-                    "selected_archive_ids": [],
-                },
-            )
-        else:
-            raise AssertionError(role)
+        assert role == "candidate_editor"
+        self.prompts.append(prompt)
+        (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
+        write_json(
+            workspace / "proposal.json",
+            {
+                "candidate_id": workspace.name,
+                "parent_id": "baseline",
+                "hypothesis_id": "h1",
+                "intervention_kind": "local_repair",
+                "mechanism_claim": "change behavior from bad to good",
+                "predicted_effect": "unit and search score improve",
+                "regression_risks": [],
+            },
+        )
         return _agent_result(role, log_dir)
 
 
@@ -252,10 +245,17 @@ class ScoreOnlyAgent:
 
 
 def _case(case_id: str, tier: str, path: str, incumbent_pass: bool):
+    roles = {
+        "public": "target_reproducer",
+        "hidden": "structural_sibling",
+        "bridge": "downstream_bridge",
+        "regression": "off_target_control",
+        "admission": "positive_witness",
+    }
     return {
         "case_id": case_id,
-        "family_id": "behavior.file.value",
         "tier": tier,
+        "evidence_role": roles[tier],
         "path": path,
         "driver": "python",
         "expected_incumbent_pass": incumbent_pass,
@@ -280,12 +280,13 @@ def _agent_result(role: str, log_dir: Path) -> AgentRunResult:
 def _config(
     tmp_path: Path,
     condition: ExperimentCondition = ExperimentCondition.ARCHIVE,
+    iterations: int = 1,
 ) -> ProjectConfig:
     return ProjectConfig(
         loop=LoopConfig(
             run_dir=tmp_path / "run",
             run_id="test",
-            iterations=1,
+            iterations=iterations,
         ),
         benchmark=BenchmarkConfig(name="appworld"),
         agents=AgentsConfig(
@@ -294,11 +295,11 @@ def _config(
             regression_author=AgentConfig(enabled=False),
         ),
         protocol=ProtocolConfig(condition=condition),
-        alignment=AlignmentConfig(),
+        memory=MemoryConfig(),
     )
 
 
-def test_search_promotes_without_opening_calibration_or_final(tmp_path: Path) -> None:
+def test_search_promotes_without_opening_final_pool(tmp_path: Path) -> None:
     config = _config(tmp_path)
     benchmark = FakeBenchmark(tmp_path, natural_gain=True)
     summary = OptimizationLoop(
@@ -311,7 +312,6 @@ def test_search_promotes_without_opening_calibration_or_final(tmp_path: Path) ->
     assert summary["final_evaluation"] == "not_opened"
     assert benchmark.calls == ["search", "search"]
     assert not (config.loop.run_dir / "sealed/final").exists()
-    assert not any("calibration" in call for call in benchmark.calls)
 
 
 def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None:
@@ -334,10 +334,10 @@ def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None
     report = runner.run(runner.seal(state))
     assert report["paired_delta"] == 1.0
     assert benchmark.calls[-2:] == ["final", "final"]
-    assert not store.calibration_observations_path.exists()
+    assert not store.memory_root.exists()
 
 
-def test_flat_local_improvement_becomes_content_addressed_archive(
+def test_flat_local_improvement_is_retained_as_latent_packet(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
@@ -347,17 +347,61 @@ def test_flat_local_improvement_becomes_content_addressed_archive(
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
     assert summary["incumbent_id"] == "baseline"
-    assert len(summary["archive_ids"]) == 1
-    archive_id = summary["archive_ids"][0]
-    manifest = config.loop.run_dir / "component_archive" / archive_id / "manifest.json"
-    assert manifest.is_file()
-    payload = read_json(manifest)
-    assert payload["archive_id"] == archive_id
-    assert payload["certificate"]["bridge_passed"] is True
-    assert (manifest.parent / "component.patch").is_file()
+    assert len(summary["latent_packets"]) == 1
+    ref = summary["latent_packets"][0]
+    store = RunStore(config.loop.run_dir)
+    bundle = store.packet_store_root / ref["path"]
+    assert (bundle / "test_packet.json").is_file()
+    patch = store.latent_root / ref["content_sha256"] / "component.patch"
+    assert patch.is_file()
+    assert "behavior.txt" in patch.read_text(encoding="utf-8")
 
 
-def test_score_only_condition_has_no_unit_archive_or_calibration_artifacts(
+class LatentFlipBenchmark(FakeBenchmark):
+    """Search transfer appears only at the second opportunity."""
+
+    def evaluate(self, *, source: Path, candidate_id: str, pool, out_dir: Path):
+        self.natural_gain = candidate_id.startswith("iter002")
+        return super().evaluate(
+            source=source, candidate_id=candidate_id, pool=pool, out_dir=out_dir
+        )
+
+
+def test_promoted_candidate_realizes_latent_packet_into_preservation(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, iterations=2)
+    benchmark = LatentFlipBenchmark(tmp_path, natural_gain=False)
+    editor = SearchAgent()
+    summary = OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": editor},
+    ).run()
+
+    # Iteration 1 archived a latent capability; iteration 2 realized it.
+    events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert "latent_packet_retained" in events
+    assert "latent_packet_realized" in events
+    assert summary["incumbent_id"] == "iter002_candidate"
+    assert summary["latent_packets"] == []
+    preserved = {ref["content_sha256"] for ref in summary["preserved_packets"]}
+    evidence = read_json(config.loop.run_dir / "iterations/iter_002/evidence.json")
+    assert len(evidence["realized_latent"]) == 1
+    assert set(evidence["realized_latent"]) <= preserved
+    assert evidence["attribution_scope"] == "composition"
+    assert evidence["component_families"] == ["verification"]
+    # The editor was shown the latent capability and its reference patch.
+    assert any("latent_capabilities.json" in prompt for prompt in editor.prompts[1:])
+    workspace_patches = list(
+        (config.loop.run_dir / "candidates/iter002_candidate").glob(
+            "latent_capabilities/*/component.patch"
+        )
+    )
+    assert workspace_patches
+
+
+def test_score_only_condition_has_no_unit_archive_or_memory_artifacts(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, ExperimentCondition.SCORE_ONLY)
@@ -374,14 +418,13 @@ def test_score_only_condition_has_no_unit_archive_or_calibration_artifacts(
         "generated_packets": False,
         "unit_gate": False,
         "partial_archive": False,
-        "delayed_alignment": False,
+        "online_ut_memory": False,
     }
     assert benchmark.calls == ["search", "search"]
     for name in (
         "test_library",
         "frozen_packets",
-        "component_archive",
-        "calibration",
+        "ut_memory",
     ):
         assert not (config.loop.run_dir / name).exists()
     evidence = read_json(config.loop.run_dir / "iterations/iter_001/evidence.json")
@@ -393,6 +436,57 @@ def test_score_only_condition_has_no_unit_archive_or_calibration_artifacts(
         "total_cost",
         "metadata",
     }
+
+
+def test_full_condition_reflects_each_completed_search_comparison(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    summary = OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+
+    store = RunStore(config.loop.run_dir)
+    assert summary["ut_memory_version"] == 1
+    assert summary["ut_feedback_episodes"] == 1
+    assert store.ut_feedback_episodes_path.is_file()
+    assert store.ut_world_model_path.is_file()
+    content = store.ut_world_model_path.read_text(encoding="utf-8")
+    assert content.startswith("# TraceUnit UT-design world model\n")
+    assert content.count("\n") >= 4
+    assert "\\n" not in content
+    assert not (config.loop.run_dir / "calibration").exists()
+
+
+def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first = FakeBenchmark(tmp_path, natural_gain=True)
+    OptimizationLoop(
+        config,
+        benchmark=first,
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+
+    store = RunStore(config.loop.run_dir)
+    state = store.load_state()
+    assert state is not None
+    state.next_iteration = 1
+    state.status = "running"
+    store.save_state(state)
+
+    first.calls.clear()
+    summary = OptimizationLoop(
+        config,
+        benchmark=first,
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+
+    assert summary["incumbent_id"] == "iter001_candidate"
+    assert first.calls == []
+    assert store.load_state() is not None
+    assert store.load_state().next_iteration == 2
 
 
 def test_raw_traceunit_records_partial_eligibility_without_persisting_component(
@@ -407,9 +501,9 @@ def test_raw_traceunit_records_partial_eligibility_without_persisting_component(
 
     assert summary["protocol"] == "c1_raw_traceunit"
     assert summary["partial_eligible_ids"] == ["iter001_candidate"]
-    assert summary["archive_ids"] == []
-    assert not (config.loop.run_dir / "component_archive").exists()
-    assert not (config.loop.run_dir / "calibration").exists()
+    assert summary["latent_packets"] == []
+    assert not RunStore(config.loop.run_dir).latent_root.exists()
+    assert not (config.loop.run_dir / "ut_memory").exists()
     candidate = config.loop.run_dir / "candidates/iter001_candidate"
-    assert not (candidate / "archive_catalog.json").exists()
-    assert not (candidate / "alignment_cards.json").exists()
+    assert not (candidate / "latent_capabilities.json").exists()
+    assert not (candidate / "ut_design_world_model.md").exists()

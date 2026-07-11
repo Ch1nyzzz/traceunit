@@ -9,7 +9,7 @@ from typing import Any
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.io import read_json, sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkPlan, PoolRole, RunState
-from traceunit.paired import paired_task_differences
+from traceunit.paired import paired_task_differences, paired_uncertainty
 from traceunit.store import RunStore
 
 
@@ -130,6 +130,7 @@ class FinalEvaluationRunner:
             ),
             "terminal_score": terminal.score,
             "paired_delta": sum(differences) / len(differences) if differences else 0.0,
+            "paired_uncertainty": paired_uncertainty(differences),
             "matched_tasks": len(differences),
             "cost": baseline.cost + terminal.cost,
         }

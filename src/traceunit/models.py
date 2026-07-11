@@ -10,9 +10,7 @@ class Decision(StrEnum):
     PARTIAL_ELIGIBLE = "partial_eligible"
     ARCHIVE = "archive"
     QUARANTINE = "quarantine"
-    EVALUATE_SEARCH = "evaluate_search"
     PROMOTE = "promote"
-    CHALLENGE_PACKET = "challenge_packet"
 
 
 class TestTier(StrEnum):
@@ -23,17 +21,56 @@ class TestTier(StrEnum):
     ADMISSION = "admission"
 
 
+class UnitFamily(StrEnum):
+    """Coarse trace-diagnosis direction, never a transfer ranking."""
+
+    INSTRUCTION = "instruction"
+    CONTEXT = "context"
+    PLANNING = "planning"
+    RETRIEVAL = "retrieval"
+    TOOL = "tool"
+    STATE = "state"
+    VERIFICATION = "verification"
+    RECOVERY = "recovery"
+    TERMINATION = "termination"
+    OTHER = "other"
+    UNCERTAIN = "uncertain"
+
+
+class EvidenceRole(StrEnum):
+    TARGET_REPRODUCER = "target_reproducer"
+    STRUCTURAL_SIBLING = "structural_sibling"
+    DOWNSTREAM_BRIDGE = "downstream_bridge"
+    POSITIVE_WITNESS = "positive_witness"
+    PRESERVATION_CONTROL = "preservation_control"
+    OFF_TARGET_CONTROL = "off_target_control"
+
+
+class InterventionKind(StrEnum):
+    LOCAL_REPAIR = "local_repair"
+    CAPABILITY_AUGMENTATION = "capability_augmentation"
+    ORCHESTRATION_CHANGE = "orchestration_change"
+
+
+class TestExecutionMode(StrEnum):
+    DETERMINISTIC = "deterministic"
+    MODEL_BACKED_PROBE = "model_backed_probe"
+
+
+class AttributionScope(StrEnum):
+    ATOMIC = "atomic"
+    COMPOSITION = "composition"
+
+
 class TestStatus(StrEnum):
     PROPOSED = "proposed"
     ADMITTED = "admitted"
     REJECTED = "rejected"
-    CHALLENGED = "challenged"
     RETIRED = "retired"
 
 
 class PoolRole(StrEnum):
     SEARCH = "search"
-    CALIBRATION = "calibration"
     FINAL = "final"
 
 
@@ -103,6 +140,8 @@ class TraceRun:
 @dataclass(frozen=True)
 class FailureHypothesis:
     hypothesis_id: str
+    family: UnitFamily
+    intervention_kind: InterventionKind
     mechanism: str
     target_boundary: str
     claim: str
@@ -114,6 +153,10 @@ class FailureHypothesis:
     def from_dict(cls, value: Mapping[str, Any]) -> "FailureHypothesis":
         return cls(
             hypothesis_id=str(value["hypothesis_id"]),
+            family=UnitFamily(str(value.get("family") or UnitFamily.UNCERTAIN)),
+            intervention_kind=InterventionKind(
+                str(value.get("intervention_kind") or InterventionKind.LOCAL_REPAIR)
+            ),
             mechanism=str(value.get("mechanism") or "unknown"),
             target_boundary=str(value.get("target_boundary") or "behavior"),
             claim=str(value.get("claim") or ""),
@@ -128,26 +171,32 @@ class FailureHypothesis:
 @dataclass(frozen=True)
 class TestCaseSpec:
     case_id: str
-    family_id: str
     tier: TestTier
+    evidence_role: EvidenceRole
     path: str
     driver: str = "python"
+    execution_mode: TestExecutionMode = TestExecutionMode.DETERMINISTIC
     arguments: tuple[str, ...] = ()
     environment: dict[str, str] = field(default_factory=dict)
     timeout_s: int = 60
     expected_incumbent_pass: bool = False
     expected_candidate_pass: bool = True
     description: str = ""
-    admission_role: str = ""
+    max_model_calls: int = 0
+    max_tokens: int = 0
+    repetitions: int = 1
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TestCaseSpec":
         return cls(
             case_id=str(value["case_id"]),
-            family_id=str(value.get("family_id") or value["case_id"]),
             tier=TestTier(str(value["tier"])),
+            evidence_role=EvidenceRole(str(value["evidence_role"])),
             path=str(value["path"]),
             driver=str(value.get("driver") or "python"),
+            execution_mode=TestExecutionMode(
+                str(value.get("execution_mode") or TestExecutionMode.DETERMINISTIC)
+            ),
             arguments=tuple(str(x) for x in value.get("arguments") or []),
             environment={
                 str(k): str(v) for k, v in dict(value.get("environment") or {}).items()
@@ -156,7 +205,9 @@ class TestCaseSpec:
             expected_incumbent_pass=bool(value.get("expected_incumbent_pass", False)),
             expected_candidate_pass=bool(value.get("expected_candidate_pass", True)),
             description=str(value.get("description") or ""),
-            admission_role=str(value.get("admission_role") or ""),
+            max_model_calls=max(0, int(value.get("max_model_calls") or 0)),
+            max_tokens=max(0, int(value.get("max_tokens") or 0)),
+            repetitions=max(1, int(value.get("repetitions") or 1)),
         )
 
 
@@ -167,19 +218,28 @@ class TestPacket:
     source_trace_ids: tuple[str, ...]
     hypotheses: tuple[FailureHypothesis, ...]
     target_hypothesis_id: str
+    primary_family: UnitFamily | None
     public_contract: str
     hidden_variant_strategy: str
     cases: tuple[TestCaseSpec, ...]
     status: TestStatus = TestStatus.PROPOSED
-    admission_score: float = 0.0
+    admission_passed: bool = False
     content_sha256: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["status"] = self.status.value
+        value["primary_family"] = (
+            self.primary_family.value if self.primary_family is not None else None
+        )
+        for hypothesis in value["hypotheses"]:
+            hypothesis["family"] = str(hypothesis["family"])
+            hypothesis["intervention_kind"] = str(hypothesis["intervention_kind"])
         for case in value["cases"]:
             case["tier"] = str(case["tier"])
+            case["evidence_role"] = str(case["evidence_role"])
+            case["execution_mode"] = str(case["execution_mode"])
         return value
 
     @classmethod
@@ -194,6 +254,11 @@ class TestPacket:
                 if isinstance(item, Mapping)
             ),
             target_hypothesis_id=str(value["target_hypothesis_id"]),
+            primary_family=(
+                None
+                if value.get("primary_family") in (None, "")
+                else UnitFamily(str(value["primary_family"]))
+            ),
             public_contract=str(value.get("public_contract") or ""),
             hidden_variant_strategy=str(value.get("hidden_variant_strategy") or ""),
             cases=tuple(
@@ -202,7 +267,7 @@ class TestPacket:
                 if isinstance(item, Mapping)
             ),
             status=TestStatus(str(value.get("status") or TestStatus.PROPOSED)),
-            admission_score=float(value.get("admission_score") or 0.0),
+            admission_passed=bool(value.get("admission_passed", False)),
             content_sha256=str(value.get("content_sha256") or ""),
             metadata=dict(value.get("metadata") or {}),
         )
@@ -211,8 +276,9 @@ class TestPacket:
 @dataclass(frozen=True)
 class TestExecution:
     case_id: str
-    family_id: str
     tier: TestTier
+    evidence_role: EvidenceRole
+    execution_mode: TestExecutionMode
     subject: str
     passed: bool
     returncode: int | None
@@ -221,10 +287,14 @@ class TestExecution:
     stderr_path: str
     timed_out: bool = False
     error: str = ""
+    model_calls: int = 0
+    tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["tier"] = self.tier.value
+        value["evidence_role"] = self.evidence_role.value
+        value["execution_mode"] = self.execution_mode.value
         return value
 
 
@@ -278,17 +348,17 @@ class PoolSliceRef:
 class BenchmarkPlan:
     benchmark: str
     search: PoolSliceRef
-    calibration: tuple[PoolSliceRef, ...]
     final: PoolSliceRef
     plan_sha256: str
+    ontology: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "benchmark": self.benchmark,
             "search": self.search.to_dict(),
-            "calibration": [item.to_dict() for item in self.calibration],
             "final": self.final.to_dict(),
             "plan_sha256": self.plan_sha256,
+            "ontology": dict(self.ontology),
         }
 
     @classmethod
@@ -296,12 +366,12 @@ class BenchmarkPlan:
         return cls(
             benchmark=str(value["benchmark"]),
             search=PoolSliceRef.from_dict(dict(value["search"])),
-            calibration=tuple(
-                PoolSliceRef.from_dict(dict(item))
-                for item in value.get("calibration") or []
-            ),
             final=PoolSliceRef.from_dict(dict(value["final"])),
             plan_sha256=str(value["plan_sha256"]),
+            ontology={
+                str(key): str(item)
+                for key, item in dict(value.get("ontology") or {}).items()
+            },
         )
 
 
@@ -348,11 +418,10 @@ class CandidateProposal:
     candidate_id: str
     parent_id: str
     hypothesis_id: str
+    intervention_kind: InterventionKind
     mechanism_claim: str
     predicted_effect: str
     regression_risks: tuple[str, ...] = ()
-    plan_id: str = ""
-    selected_archive_ids: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -364,13 +433,12 @@ class CandidateProposal:
             candidate_id=str(value["candidate_id"]),
             parent_id=str(value["parent_id"]),
             hypothesis_id=str(value["hypothesis_id"]),
+            intervention_kind=InterventionKind(
+                str(value.get("intervention_kind") or InterventionKind.LOCAL_REPAIR)
+            ),
             mechanism_claim=str(value.get("mechanism_claim") or ""),
             predicted_effect=str(value.get("predicted_effect") or ""),
             regression_risks=tuple(str(x) for x in value.get("regression_risks") or []),
-            plan_id=str(value.get("plan_id") or ""),
-            selected_archive_ids=tuple(
-                str(item) for item in value.get("selected_archive_ids") or []
-            ),
             metadata=dict(value.get("metadata") or {}),
         )
 
@@ -438,15 +506,27 @@ class EvidenceRecord:
     hidden_gain: float
     bridge_gain: float
     regression_loss: float
-    admission_score: float
+    contract_passed: bool
+    bridge_contract_passed: bool
+    primary_family: UnitFamily | None = None
+    intervention_kind: InterventionKind = InterventionKind.LOCAL_REPAIR
+    attribution_scope: AttributionScope = AttributionScope.ATOMIC
+    component_families: tuple[UnitFamily, ...] = ()
+    realized_latent: tuple[str, ...] = ()
     search_delta: float | None = None
-    archive_replay_passed: bool = True
     preservation_passed: bool = True
     total_cost: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value["primary_family"] = (
+            self.primary_family.value if self.primary_family is not None else None
+        )
+        value["intervention_kind"] = self.intervention_kind.value
+        value["attribution_scope"] = self.attribution_scope.value
+        value["component_families"] = [item.value for item in self.component_families]
+        return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceRecord":
@@ -458,13 +538,30 @@ class EvidenceRecord:
             hidden_gain=float(value.get("hidden_gain") or 0.0),
             bridge_gain=float(value.get("bridge_gain") or 0.0),
             regression_loss=float(value.get("regression_loss") or 0.0),
-            admission_score=float(value.get("admission_score") or 0.0),
+            contract_passed=bool(value.get("contract_passed", False)),
+            bridge_contract_passed=bool(value.get("bridge_contract_passed", False)),
+            primary_family=(
+                None
+                if value.get("primary_family") in (None, "")
+                else UnitFamily(str(value["primary_family"]))
+            ),
+            intervention_kind=InterventionKind(
+                str(value.get("intervention_kind") or InterventionKind.LOCAL_REPAIR)
+            ),
+            attribution_scope=AttributionScope(
+                str(value.get("attribution_scope") or AttributionScope.ATOMIC)
+            ),
+            component_families=tuple(
+                UnitFamily(str(item)) for item in value.get("component_families") or []
+            ),
+            realized_latent=tuple(
+                str(item) for item in value.get("realized_latent") or []
+            ),
             search_delta=(
                 None
                 if value.get("search_delta") is None
                 else float(value["search_delta"])
             ),
-            archive_replay_passed=bool(value.get("archive_replay_passed", True)),
             preservation_passed=bool(value.get("preservation_passed", True)),
             total_cost=float(value.get("total_cost") or 0.0),
             metadata=dict(value.get("metadata") or {}),
@@ -509,21 +606,15 @@ class RunState:
     condition: str = "c3_full"
     capabilities: dict[str, bool] = field(default_factory=dict)
     promoted_ids: list[str] = field(default_factory=list)
-    archive_ids: list[str] = field(default_factory=list)
     partial_eligible_ids: list[str] = field(default_factory=list)
     quarantined_ids: list[str] = field(default_factory=list)
-    challenged_packet_ids: list[str] = field(default_factory=list)
     preserved_packet_refs: list[dict[str, str]] = field(default_factory=list)
+    latent_packet_refs: list[dict[str, str]] = field(default_factory=list)
     active_packet_id: str = ""
     active_packet_path: str = ""
     active_packet_uses: int = 0
-    calibration_epoch: int = 0
-    next_calibration_shard: int = 0
-    pending_calibration_ids: list[str] = field(default_factory=list)
     committed_iterations: list[int] = field(default_factory=list)
-    applied_calibration_checkpoint_ids: list[str] = field(default_factory=list)
     search_cost: float = 0.0
-    calibration_cost: float = 0.0
     total_cost: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -545,33 +636,24 @@ class RunState:
                 for key, item in dict(value.get("capabilities") or {}).items()
             },
             promoted_ids=[str(x) for x in value.get("promoted_ids") or []],
-            archive_ids=[str(x) for x in value.get("archive_ids") or []],
             partial_eligible_ids=[
                 str(x) for x in value.get("partial_eligible_ids") or []
             ],
             quarantined_ids=[str(x) for x in value.get("quarantined_ids") or []],
-            challenged_packet_ids=[
-                str(x) for x in value.get("challenged_packet_ids") or []
-            ],
             preserved_packet_refs=[
                 {str(key): str(item) for key, item in dict(ref).items()}
                 for ref in value.get("preserved_packet_refs") or []
             ],
+            latent_packet_refs=[
+                {str(key): str(item) for key, item in dict(ref).items()}
+                for ref in value.get("latent_packet_refs") or []
+            ],
             active_packet_id=str(value.get("active_packet_id") or ""),
             active_packet_path=str(value.get("active_packet_path") or ""),
             active_packet_uses=int(value.get("active_packet_uses") or 0),
-            calibration_epoch=int(value.get("calibration_epoch") or 0),
-            next_calibration_shard=int(value.get("next_calibration_shard") or 0),
-            pending_calibration_ids=[
-                str(x) for x in value.get("pending_calibration_ids") or []
-            ],
+            search_cost=float(value.get("search_cost") or 0.0),
             committed_iterations=[
                 int(x) for x in value.get("committed_iterations") or []
             ],
-            applied_calibration_checkpoint_ids=[
-                str(x) for x in value.get("applied_calibration_checkpoint_ids") or []
-            ],
-            search_cost=float(value.get("search_cost") or 0.0),
-            calibration_cost=float(value.get("calibration_cost") or 0.0),
             total_cost=float(value.get("total_cost") or 0.0),
         )

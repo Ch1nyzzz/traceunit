@@ -1,36 +1,16 @@
 from __future__ import annotations
-
 import shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping
-
 from traceunit.agents.runner import WorkspaceAgent, build_agent
-from traceunit.archive import (
-    ArchiveCatalog,
-    ArchiveKind,
-    ArchiveManifest,
-    CompositionPlan,
-    FrozenPacketRef,
-    LocalCertificate,
-)
 from traceunit.benchmarks import BenchmarkAdapter, build_benchmark
-from traceunit.calibration import AlignmentCalibrator
-from traceunit.candidate import CandidateBuilder
-from traceunit.composition import copy_packet_into_archive
+from traceunit.candidate import CandidateBuildError, CandidateBuilder
 from traceunit.config import ProjectConfig
 from traceunit.decision import DecisionPolicy
 from traceunit.evaluation import CandidateEvaluator
-from traceunit.io import (
-    append_jsonl,
-    copy_source,
-    read_json,
-    read_jsonl,
-    sha256_file,
-    sha256_tree,
-    source_diff,
-    write_json,
-)
+from traceunit.io import copy_source, read_json, source_diff, write_json
+from traceunit.replay import FrozenPacketRef, copy_packet_into_store
 from traceunit.models import (
     BenchmarkPlan,
     CandidateProposal,
@@ -40,16 +20,11 @@ from traceunit.models import (
     RunState,
     TestPacket,
 )
+from traceunit.ontology import freeze_ontology, ontology_ref
 from traceunit.packets import PacketAuthor, TestDesignFailure
-from traceunit.protocol import (
-    AlignmentCheckpointRunner,
-    CalibrationCheckpoint,
-    CalibrationSubject,
-    RotationScheduler,
-    decision_file_hash,
-)
 from traceunit.score_only import ScoreOnlyCandidateBuilder, ScoreOnlyEvaluator
 from traceunit.store import RunStore
+from traceunit.ut_memory import UTMemoryLedger, UTMemoryManager
 from traceunit.trace_evidence import (
     NoFailureTraces,
     TraceEvidenceError,
@@ -86,16 +61,24 @@ class OptimizationLoop:
             if config.capabilities.generated_packets
             else None
         )
-        self.policy = DecisionPolicy(config.decision)
-        self.calibrator = AlignmentCalibrator(self.store.calibration_observations_path)
-        self.checkpoints = AlignmentCheckpointRunner(
-            root=self.store.calibration_root,
-            config=config.alignment,
-            calibrator=self.calibrator,
+        self.ut_critic_agent = (
+            supplied.get("ut_critic")
+            or (
+                build_agent(config.agents.ut_critic)
+                if config.agents.ut_critic.enabled
+                else None
+            )
+            if config.capabilities.online_ut_memory
+            else None
         )
-        self.scheduler = RotationScheduler(
-            config=config.alignment,
-            calibrator=self.calibrator,
+        self.policy = DecisionPolicy(config.decision)
+        self.ut_memory_ledger = UTMemoryLedger(self.store.ut_feedback_episodes_path)
+        self.ut_memory = UTMemoryManager(
+            root=self.store.memory_root,
+            ledger=self.ut_memory_ledger,
+            critic=self.ut_critic_agent,
+            max_lessons=config.memory.max_world_model_lessons,
+            world_model_path=self.store.ut_world_model_path,
         )
         self.benchmark_plan: BenchmarkPlan | None = None
         self.packet_author: PacketAuthor | None = None
@@ -109,6 +92,7 @@ class OptimizationLoop:
             config_snapshot=asdict(self.config),
             capabilities=asdict(self.config.capabilities),
         )
+        freeze_ontology(self.store.ontology_path)
         self._preflight_agents()
         plan = self.benchmark.prepare(self.store.root)
         self._bind_plan(plan)
@@ -130,8 +114,8 @@ class OptimizationLoop:
             state = self._initialize_baseline()
         state.status = "running"
         self.store.save_state(state)
-        if self.config.capabilities.delayed_alignment:
-            self.checkpoints.write_public_cards(self.store.calibration_cards_path)
+        if self.config.capabilities.online_ut_memory:
+            self.ut_memory.ensure_world_model()
 
         while state.next_iteration <= self.config.loop.iterations:
             iteration = state.next_iteration
@@ -149,6 +133,8 @@ class OptimizationLoop:
                 state = self._skip_failed_test_design(state, iteration, exc)
             except TraceEvidenceError as exc:
                 state = self._skip_failed_trace_evidence(state, iteration, exc)
+            except CandidateBuildError as exc:
+                state = self._skip_failed_candidate_build(state, iteration, exc)
             except Exception as exc:
                 state.status = "error"
                 self.store.save_state(state)
@@ -167,6 +153,10 @@ class OptimizationLoop:
         return summary
 
     def _bind_plan(self, plan: BenchmarkPlan) -> None:
+        if plan.ontology != ontology_ref():
+            raise RuntimeError(
+                "benchmark plan is not bound to the frozen TraceUnit L0 ontology"
+            )
         self.benchmark_plan = plan
         write_json(self.store.benchmark_plan_path, plan.to_dict())
         if not self.config.capabilities.generated_packets:
@@ -210,6 +200,7 @@ class OptimizationLoop:
             self.test_author_agent,
             self.search_agent,
             self.regression_author_agent,
+            self.ut_critic_agent,
         ):
             preflight = getattr(agent, "preflight", None)
             if callable(preflight):
@@ -256,42 +247,41 @@ class OptimizationLoop:
         assert self.candidate_builder is not None
         assert self.evaluator is not None
         iteration_dir = self.store.iteration_dir(iteration)
-        test_cards, search_cards = self._freeze_card_inputs(iteration_dir)
+        decision_path = iteration_dir / "decision.json"
+        if decision_path.is_file():
+            return self._resume_completed_iteration(
+                state=state, iteration=iteration, iteration_dir=iteration_dir
+            )
+        ut_memory = self._freeze_memory_input(iteration_dir)
         write_json(
             iteration_dir / "iteration_status.json",
             {
                 "iteration": iteration,
                 "status": "running",
                 "incumbent": state.incumbent_id,
-                "card_version": self.calibrator.version,
+                "memory_version": self.ut_memory_ledger.version,
             },
         )
         packet, packet_path, reused = self.packet_author.get_or_author(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
-            alignment_cards_path=test_cards,
+            ut_memory_path=ut_memory,
         )
-        proposal, composition, candidate_source, diff_text = (
-            self.candidate_builder.build(
-                state=state,
-                iteration=iteration,
-                iteration_dir=iteration_dir,
-                packet=packet,
-                packet_path=packet_path,
-                alignment_cards_path=search_cards,
-            )
+        proposal, candidate_source, diff_text = self.candidate_builder.build(
+            state=state,
+            iteration=iteration,
+            iteration_dir=iteration_dir,
+            packet=packet,
+            packet_path=packet_path,
         )
         write_json(iteration_dir / "candidate_proposal.json", proposal.to_dict())
         (iteration_dir / "candidate.diff").write_text(diff_text, encoding="utf-8")
-        catalog = self.candidate_builder.catalog()
         evidence, decision = self.evaluator.evaluate_candidate(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
             proposal=proposal,
-            composition=composition,
-            catalog=catalog,
             packet=packet,
             packet_path=packet_path,
             candidate_source=candidate_source,
@@ -300,32 +290,143 @@ class OptimizationLoop:
         )
         decision = replace(decision, evidence=evidence)
         write_json(iteration_dir / "evidence.json", evidence.to_dict())
-        decision_path = iteration_dir / "decision.json"
         write_json(decision_path, decision.to_dict())
 
         state = self._commit_decision(
             state=state,
             iteration=iteration,
-            iteration_dir=iteration_dir,
             proposal=proposal,
-            composition=composition,
             packet=packet,
             packet_path=packet_path,
             candidate_source=candidate_source,
             evidence=evidence,
             decision=decision,
         )
-        if self.config.capabilities.delayed_alignment and not evidence.metadata.get(
+        self._reflect_iteration(
+            iteration=iteration,
+            proposal=proposal,
+            packet_path=packet_path,
+            evidence=evidence,
+            decision=decision,
+        )
+        return self._finish_iteration(
+            state=state,
+            iteration=iteration,
+            iteration_dir=iteration_dir,
+            proposal=proposal,
+            packet=packet,
+            decision=decision,
+        )
+
+    def _resume_completed_iteration(
+        self,
+        *,
+        state: RunState,
+        iteration: int,
+        iteration_dir: Path,
+    ) -> RunState:
+        """Commit an existing decision artifact without recomputing evidence."""
+
+        assert self.packet_author is not None
+        decision_path = iteration_dir / "decision.json"
+        evidence_path = iteration_dir / "evidence.json"
+        proposal_path = iteration_dir / "candidate_proposal.json"
+        packet_ref_path = iteration_dir / "packet_ref.json"
+        required = (decision_path, evidence_path, proposal_path, packet_ref_path)
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise RuntimeError(
+                "cannot resume an incomplete decision artifact; missing "
+                + ", ".join(missing)
+            )
+        decision = DecisionRecord.from_dict(read_json(decision_path))
+        evidence = EvidenceRecord.from_dict(read_json(evidence_path))
+        if decision.evidence.to_dict() != evidence.to_dict():
+            raise RuntimeError("decision evidence does not match evidence.json")
+        proposal = CandidateProposal.from_dict(read_json(proposal_path))
+        packet_path = Path(str(read_json(packet_ref_path)["path"]))
+        packet = self.packet_author._verified(packet_path)
+        candidate_source = Path(
+            str(
+                evidence.metadata.get(
+                    "candidate_source",
+                    self.store.candidate_dir(proposal.candidate_id) / "source",
+                )
+            )
+        )
+        if not candidate_source.is_dir():
+            raise RuntimeError("cannot resume: candidate source is missing")
+        state = self._commit_decision(
+            state=state,
+            iteration=iteration,
+            proposal=proposal,
+            packet=packet,
+            packet_path=packet_path,
+            candidate_source=candidate_source,
+            evidence=evidence,
+            decision=decision,
+        )
+        self._reflect_iteration(
+            iteration=iteration,
+            proposal=proposal,
+            packet_path=packet_path,
+            evidence=evidence,
+            decision=decision,
+        )
+        self.store.append_event(
+            "iteration_resumed_from_decision",
+            iteration=iteration,
+            candidate_id=proposal.candidate_id,
+        )
+        return self._finish_iteration(
+            state=state,
+            iteration=iteration,
+            iteration_dir=iteration_dir,
+            proposal=proposal,
+            packet=packet,
+            decision=decision,
+        )
+
+    def _reflect_iteration(
+        self,
+        *,
+        iteration: int,
+        proposal: CandidateProposal,
+        packet_path: Path,
+        evidence: EvidenceRecord,
+        decision: DecisionRecord,
+    ) -> None:
+        if not self.config.capabilities.online_ut_memory or evidence.metadata.get(
             "violations"
         ):
-            self._enqueue_calibration_subject(
-                state=state,
-                proposal=proposal,
-                composition=composition,
-                evidence=evidence,
-                decision_path=decision_path,
+            return
+        episode = self.ut_memory.reflect_iteration(
+            iteration=iteration,
+            proposal=proposal,
+            packet_path=packet_path,
+            evidence=evidence,
+            decision=decision,
+        )
+        if episode is not None:
+            self.store.append_event(
+                "ut_memory_updated",
+                iteration=iteration,
+                candidate_id=proposal.candidate_id,
+                memory_version=self.ut_memory_ledger.version,
+                search_outcome=episode.search_outcome.value,
+                assessment=episode.assessment.value,
             )
-        self._maybe_run_calibration(state=state, iteration=iteration)
+
+    def _finish_iteration(
+        self,
+        *,
+        state: RunState,
+        iteration: int,
+        iteration_dir: Path,
+        proposal: CandidateProposal,
+        packet: TestPacket,
+        decision: DecisionRecord,
+    ) -> RunState:
         state.next_iteration = iteration + 1
         state.status = "running"
         self.store.save_state(state)
@@ -385,7 +486,10 @@ class OptimizationLoop:
             if decision.decision is Decision.PROMOTE:
                 state.incumbent_id = proposal.candidate_id
                 state.incumbent_source = str(candidate_source.resolve())
-                state.incumbent_search_score += float(evidence.search_delta or 0.0)
+                search = dict(evidence.metadata.get("search") or {})
+                if "candidate_score" not in search:
+                    raise RuntimeError("promoted candidate is missing its search score")
+                state.incumbent_search_score = float(search["candidate_score"])
                 if proposal.candidate_id not in state.promoted_ids:
                     state.promoted_ids.append(proposal.candidate_id)
             state.committed_iterations.append(iteration)
@@ -417,9 +521,7 @@ class OptimizationLoop:
         *,
         state: RunState,
         iteration: int,
-        iteration_dir: Path,
         proposal: CandidateProposal,
-        composition: CompositionPlan,
         packet: TestPacket,
         packet_path: Path,
         candidate_source: Path,
@@ -433,28 +535,34 @@ class OptimizationLoop:
         if decision.decision is Decision.PROMOTE:
             state.incumbent_id = proposal.candidate_id
             state.incumbent_source = str(candidate_source.resolve())
-            state.incumbent_search_score += float(evidence.search_delta or 0.0)
+            search = dict(evidence.metadata.get("search") or {})
+            if "candidate_score" not in search:
+                raise RuntimeError("promoted candidate is missing its search score")
+            state.incumbent_search_score = float(search["candidate_score"])
             if proposal.candidate_id not in state.promoted_ids:
                 state.promoted_ids.append(proposal.candidate_id)
-            ref = self._archive_packet(packet, packet_path)
+            ref = self._store_packet(packet, packet_path)
             if ref.to_dict() not in state.preserved_packet_refs:
                 state.preserved_packet_refs.append(ref.to_dict())
+            self._promote_realized_latent(state, evidence)
             PacketAuthor.retire_active(state)
         elif decision.decision is Decision.ARCHIVE:
             if not self.config.capabilities.partial_archive:
                 raise RuntimeError("archive decision reached with archive disabled")
-            manifest = self._archive_component(
-                proposal=proposal,
-                composition=composition,
+            ref = self._retain_latent_packet(
                 packet=packet,
                 packet_path=packet_path,
                 parent_source=Path(str(evidence.metadata["parent_source"])),
                 candidate_source=candidate_source,
-                evidence=evidence,
-                iteration_dir=iteration_dir,
             )
-            if manifest.archive_id not in state.archive_ids:
-                state.archive_ids.append(manifest.archive_id)
+            if ref.to_dict() not in state.latent_packet_refs:
+                state.latent_packet_refs.append(ref.to_dict())
+            self.store.append_event(
+                "latent_packet_retained",
+                candidate_id=proposal.candidate_id,
+                packet_id=ref.packet_id,
+                content_sha256=ref.content_sha256,
+            )
             PacketAuthor.retire_active(state)
         elif decision.decision is Decision.PARTIAL_ELIGIBLE:
             if proposal.candidate_id not in state.partial_eligible_ids:
@@ -464,10 +572,6 @@ class OptimizationLoop:
             if proposal.candidate_id not in state.quarantined_ids:
                 state.quarantined_ids.append(proposal.candidate_id)
             PacketAuthor.retire_active(state)
-        elif decision.decision is Decision.CHALLENGE_PACKET:
-            if packet.packet_id not in state.challenged_packet_ids:
-                state.challenged_packet_ids.append(packet.packet_id)
-            PacketAuthor.retire_active(state)
         else:
             state.active_packet_uses += 1
             if state.active_packet_uses >= self.config.loop.max_attempts_per_packet:
@@ -476,116 +580,49 @@ class OptimizationLoop:
         self.store.save_state(state)
         return state
 
-    def _archive_component(
+    def _retain_latent_packet(
         self,
         *,
-        proposal: CandidateProposal,
-        composition: CompositionPlan,
         packet: TestPacket,
         packet_path: Path,
         parent_source: Path,
         candidate_source: Path,
-        evidence: EvidenceRecord,
-        iteration_dir: Path,
-    ) -> ArchiveManifest:
-        packet_ref = self._archive_packet(packet, packet_path)
-        patch_text = source_diff(parent_source, candidate_source)
-        staging = self.store.component_archive_root / ".staging" / proposal.candidate_id
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True, exist_ok=True)
-        patch_path = staging / "component.patch"
-        patch_path.write_text(patch_text, encoding="utf-8")
-        certificate = LocalCertificate(
-            frozen_packet_refs=(packet_ref,),
-            family_keys=tuple(str(item) for item in evidence.metadata["family_keys"]),
-            public_passed=(
-                evidence.public_gain >= self.config.decision.min_public_gain
-            ),
-            hidden_passed=(
-                evidence.hidden_gain >= self.config.decision.min_hidden_gain
-            ),
-            bridge_passed=(
-                evidence.bridge_gain >= self.config.decision.min_bridge_gain
-            ),
-            regression_passed=(
-                evidence.regression_loss <= self.config.decision.max_regression_loss
-            ),
-            public_score=evidence.public_gain,
-            hidden_score=evidence.hidden_gain,
-            bridge_score=evidence.bridge_gain,
-            regression_loss=evidence.regression_loss,
-        )
-        kind = (
-            ArchiveKind.COMPOSITE if composition.component_ids else ArchiveKind.ATOMIC
-        )
-        target_hypothesis = next(
-            hypothesis
-            for hypothesis in packet.hypotheses
-            if hypothesis.hypothesis_id == packet.target_hypothesis_id
-        )
-        manifest = ArchiveManifest(
-            kind=kind,
-            parent_source_sha256=sha256_tree(parent_source),
-            candidate_source_sha256=sha256_tree(candidate_source),
-            patch_path=f".staging/{proposal.candidate_id}/component.patch",
-            patch_sha256=sha256_file(patch_path),
-            certificate=certificate,
-            mechanism=proposal.mechanism_claim,
-            target_boundary=target_hypothesis.target_boundary,
-            constituents=composition.component_ids,
-            trace_signature=packet.source_trace_ids,
-            applicability=proposal.regression_risks,
-        )
-        component_dir = self.store.component_archive_root / manifest.archive_id
-        manifest = replace(
-            manifest,
-            patch_path=f"{manifest.archive_id}/component.patch",
-        )
-        if component_dir.exists():
-            existing = ArchiveManifest.from_dict(
-                read_json(component_dir / "manifest.json")
-            )
-            existing_patch = component_dir / "component.patch"
-            if (
-                existing.identity_dict() != manifest.identity_dict()
-                or not existing_patch.is_file()
-                or sha256_file(existing_patch) != manifest.patch_sha256
-            ):
-                raise RuntimeError(
-                    f"content-addressed archive collision: {manifest.archive_id}"
-                )
-            shutil.rmtree(staging)
-            manifest = existing
-        else:
-            write_json(staging / "manifest.json", manifest.to_dict())
-            staging.rename(component_dir)
-        usage_path = self.store.component_archive_root / "usage.jsonl"
-        if not any(
-            row.get("candidate_id") == proposal.candidate_id
-            and row.get("component_id") == manifest.archive_id
-            for row in read_jsonl(usage_path)
-        ):
-            append_jsonl(
-                usage_path,
-                {
-                    "candidate_id": proposal.candidate_id,
-                    "component_id": manifest.archive_id,
-                    "attempt_fingerprint": composition.attempt_fingerprint,
-                    "status": "archived",
-                },
-            )
-        ArchiveCatalog.load(self.store.component_archive_root)
-        self.store.append_event(
-            "component_archived",
-            candidate_id=proposal.candidate_id,
-            component_id=manifest.archive_id,
-        )
-        return manifest
+    ) -> FrozenPacketRef:
+        """Keep the frozen packet as a latent capability with a reference patch."""
 
-    def _archive_packet(self, packet: TestPacket, packet_path: Path) -> FrozenPacketRef:
-        relative = copy_packet_into_archive(
-            archive_root=self.store.packet_store_root,
+        ref = self._store_packet(packet, packet_path)
+        patch_path = self.store.latent_root / ref.content_sha256 / "component.patch"
+        if not patch_path.is_file():
+            patch_path.parent.mkdir(parents=True, exist_ok=True)
+            patch_path.write_text(
+                source_diff(parent_source, candidate_source), encoding="utf-8"
+            )
+        return ref
+
+    def _promote_realized_latent(
+        self, state: RunState, evidence: EvidenceRecord
+    ) -> None:
+        """Migrate latent packets the promoted candidate satisfied into preservation."""
+
+        realized = set(evidence.realized_latent)
+        still_latent: list[dict[str, str]] = []
+        for raw_ref in state.latent_packet_refs:
+            if raw_ref.get("content_sha256") in realized:
+                if raw_ref not in state.preserved_packet_refs:
+                    state.preserved_packet_refs.append(raw_ref)
+                self.store.append_event(
+                    "latent_packet_realized",
+                    candidate_id=state.incumbent_id,
+                    packet_id=raw_ref.get("packet_id"),
+                    content_sha256=raw_ref.get("content_sha256"),
+                )
+            else:
+                still_latent.append(raw_ref)
+        state.latent_packet_refs = still_latent
+
+    def _store_packet(self, packet: TestPacket, packet_path: Path) -> FrozenPacketRef:
+        relative = copy_packet_into_store(
+            packet_root=self.store.packet_store_root,
             packet_bundle=packet_path,
             content_sha256=packet.content_sha256,
         )
@@ -595,190 +632,15 @@ class OptimizationLoop:
             content_sha256=packet.content_sha256,
         )
 
-    def _enqueue_calibration_subject(
-        self,
-        *,
-        state: RunState,
-        proposal: CandidateProposal,
-        composition: CompositionPlan,
-        evidence: EvidenceRecord,
-        decision_path: Path,
-    ) -> None:
-        subject = CalibrationSubject(
-            candidate_id=proposal.candidate_id,
-            parent_id=str(evidence.metadata["parent_id"]),
-            lineage_id=state.run_id,
-            candidate_source=str(evidence.metadata["candidate_source"]),
-            parent_source=str(evidence.metadata["parent_source"]),
-            candidate_source_sha256=sha256_tree(
-                Path(str(evidence.metadata["candidate_source"]))
-            ),
-            parent_source_sha256=sha256_tree(
-                Path(str(evidence.metadata["parent_source"]))
-            ),
-            decision_path=str(decision_path.resolve()),
-            decision_sha256=decision_file_hash(decision_path),
-            family_keys=tuple(
-                str(item) for item in evidence.metadata.get("family_keys") or []
-            ),
-            unit_profile=_unit_profile(evidence, self.config),
-            stratum=_calibration_stratum(evidence),
-            composition_signature=(
-                composition.attempt_fingerprint if composition.component_ids else ""
-            ),
-        )
-        path = self.store.calibration_root / "pending" / f"{proposal.candidate_id}.json"
-        if path.is_file() and read_json(path) != subject.to_dict():
-            raise RuntimeError(
-                f"pending calibration subject changed: {proposal.candidate_id}"
-            )
-        write_json(path, subject.to_dict())
-        if proposal.candidate_id not in state.pending_calibration_ids:
-            state.pending_calibration_ids.append(proposal.candidate_id)
-        if not any(
-            row.get("candidate_id") == proposal.candidate_id
-            for row in read_jsonl(self.store.calibration_queue_path)
-        ):
-            append_jsonl(self.store.calibration_queue_path, subject.to_dict())
-        self.store.save_state(state)
-
-    def _maybe_run_calibration(self, *, state: RunState, iteration: int) -> None:
-        assert self.evaluator is not None
-        if not self.config.capabilities.delayed_alignment:
-            return
-        self._reconcile_completed_checkpoints(state)
-        reserved = self.checkpoints.reserved_checkpoint()
-        if reserved is not None:
-            checkpoint = reserved
-            reasons = ("resume_reserved_checkpoint",)
-        else:
-            pending = tuple(
-                CalibrationSubject.from_dict(
-                    read_json(
-                        self.store.calibration_root / "pending" / f"{candidate_id}.json"
-                    )
-                )
-                for candidate_id in state.pending_calibration_ids
-            )
-            available = self.checkpoints.available_shards(self._plan.calibration)
-            rotation = self.scheduler.decide(
-                pending=pending,
-                available_shards=available,
-                known_composition_signatures=self._known_composition_signatures(),
-            )
-            if not rotation.open_checkpoint or rotation.shard is None:
-                return
-            checkpoint = self.checkpoints.freeze(
-                iteration=iteration,
-                shard=rotation.shard,
-                subjects=pending,
-            )
-            reasons = rotation.reasons
-        self.checkpoints.run(
-            checkpoint,
-            evaluate=lambda source, candidate_id, pool, tag: (
-                self.evaluator.evaluate_pool(
-                    source=source,
-                    candidate_id=candidate_id,
-                    pool=pool,
-                    cache_tag=tag,
-                )
-            ),
-            noninferiority_margin=self.config.decision.noninferiority_margin,
-            positive_effect=self.config.alignment.positive_margin,
-        )
-        self._apply_checkpoint_result(state, checkpoint, reasons=reasons)
-
-    def _reconcile_completed_checkpoints(self, state: RunState) -> None:
-        for result_path in sorted(
-            self.store.calibration_root.glob("checkpoints/*/result.json")
-        ):
-            checkpoint_id = result_path.parent.name
-            if checkpoint_id in state.applied_calibration_checkpoint_ids:
-                continue
-            checkpoint = CalibrationCheckpoint.from_dict(
-                read_json(result_path.parent / "checkpoint.json")
-            )
-            self._apply_checkpoint_result(
-                state,
-                checkpoint,
-                reasons=("reconcile_completed_checkpoint",),
-            )
-
-    def _apply_checkpoint_result(
-        self,
-        state: RunState,
-        checkpoint: CalibrationCheckpoint,
-        *,
-        reasons: tuple[str, ...],
-    ) -> None:
-        if checkpoint.checkpoint_id in state.applied_calibration_checkpoint_ids:
-            return
-        result_path = (
-            self.store.calibration_root
-            / "checkpoints"
-            / checkpoint.checkpoint_id
-            / "result.json"
-        )
-        result = read_json(result_path)
-        if result.get("checkpoint_id") != checkpoint.checkpoint_id:
-            raise RuntimeError("calibration result does not match its checkpoint")
-        consumed = {item.candidate_id for item in checkpoint.subjects}
-        state.pending_calibration_ids = [
-            item for item in state.pending_calibration_ids if item not in consumed
-        ]
-        cost = float(result.get("cost") or 0.0)
-        state.calibration_cost += cost
-        state.total_cost += cost
-        state.calibration_epoch = max(
-            state.calibration_epoch, int(result["card_version_after"])
-        )
-        state.next_calibration_shard = max(
-            state.next_calibration_shard, checkpoint.shard.ordinal + 1
-        )
-        state.applied_calibration_checkpoint_ids.append(checkpoint.checkpoint_id)
-        self.checkpoints.write_public_cards(self.store.calibration_cards_path)
-        self.store.save_state(state)
-        self.store.append_event(
-            "alignment_checkpoint_completed",
-            checkpoint_id=checkpoint.checkpoint_id,
-            shard_id=checkpoint.shard.slice_id,
-            reasons=reasons,
-            card_version=self.calibrator.version,
-            cost=cost,
-        )
-
-    def _known_composition_signatures(self) -> tuple[str, ...]:
-        signatures: set[str] = set()
-        for result_path in self.store.calibration_root.glob(
-            "checkpoints/*/result.json"
-        ):
-            checkpoint = CalibrationCheckpoint.from_dict(
-                read_json(result_path.parent / "checkpoint.json")
-            )
-            signatures.update(
-                subject.composition_signature
-                for subject in checkpoint.subjects
-                if subject.composition_signature
-            )
-        return tuple(sorted(signatures))
-
-    def _freeze_card_inputs(
-        self, iteration_dir: Path
-    ) -> tuple[Path | None, Path | None]:
-        if not self.config.capabilities.delayed_alignment:
-            return None, None
-        if (
-            self.config.capabilities.delayed_alignment
-            and not self.store.calibration_cards_path.is_file()
-        ):
-            self.checkpoints.write_public_cards(self.store.calibration_cards_path)
-        payload = read_json(self.store.calibration_cards_path)
-        test_path = iteration_dir / "inputs" / "test_author_cards.json"
-        search_path = iteration_dir / "inputs" / "search_cards.json"
-        write_json(test_path, {**payload, "audience": "test_author"})
-        write_json(search_path, {**payload, "audience": "search"})
-        return test_path, search_path
+    def _freeze_memory_input(self, iteration_dir: Path) -> Path | None:
+        if not self.config.capabilities.online_ut_memory:
+            return None
+        if not self.store.ut_world_model_path.is_file():
+            self.ut_memory.ensure_world_model()
+        test_path = iteration_dir / "inputs" / "ut_design_world_model.md"
+        test_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.store.ut_world_model_path, test_path)
+        return test_path
 
     def _skip_failed_test_design(
         self, state: RunState, iteration: int, exc: Exception
@@ -817,6 +679,25 @@ class OptimizationLoop:
         self.store.save_state(state)
         return state
 
+    def _skip_failed_candidate_build(
+        self, state: RunState, iteration: int, exc: Exception
+    ) -> RunState:
+        self.store.append_event(
+            "candidate_build_failed", iteration=iteration, error=str(exc)
+        )
+        write_json(
+            self.store.iteration_dir(iteration) / "iteration_status.json",
+            {
+                "iteration": iteration,
+                "status": "candidate_build_failed",
+                "error": str(exc),
+            },
+        )
+        PacketAuthor.retire_active(state)
+        state.next_iteration += 1
+        self.store.save_state(state)
+        return state
+
     def _summary(self, state: RunState) -> dict[str, Any]:
         return {
             "protocol": self.config.protocol.condition.value,
@@ -829,30 +710,33 @@ class OptimizationLoop:
             "incumbent_id": state.incumbent_id,
             "incumbent_search_score": state.incumbent_search_score,
             "promoted_ids": state.promoted_ids,
-            "archive_ids": state.archive_ids,
+            "latent_packets": list(state.latent_packet_refs),
+            "preserved_packets": list(state.preserved_packet_refs),
             "partial_eligible_ids": state.partial_eligible_ids,
             "quarantined_ids": state.quarantined_ids,
-            "challenged_packet_ids": state.challenged_packet_ids,
-            "alignment_version": self.calibrator.version,
-            "alignment_observations": len(self.calibrator.observations),
-            "pending_calibration_ids": state.pending_calibration_ids,
+            "ut_memory_version": self.ut_memory_ledger.version,
+            "ut_feedback_episodes": len(self.ut_memory_ledger.episodes),
             "total_cost": state.total_cost,
             "search_cost": state.search_cost,
-            "calibration_cost": state.calibration_cost,
             "unit_test_wall_seconds": self._unit_test_wall_seconds(),
-            "calibration_cards_path": (
-                str(self.store.calibration_cards_path)
-                if self.config.capabilities.delayed_alignment
+            "model_probe_calls": int(self._unit_cost_total("model_probe_calls")),
+            "model_probe_tokens": int(self._unit_cost_total("model_probe_tokens")),
+            "ut_world_model_path": (
+                str(self.store.ut_world_model_path)
+                if self.config.capabilities.online_ut_memory
                 else None
             ),
             "final_evaluation": "not_opened",
         }
 
     def _unit_test_wall_seconds(self) -> float:
+        return self._unit_cost_total("unit_test_wall_seconds")
+
+    def _unit_cost_total(self, key: str) -> float:
         total = 0.0
         for path in (self.store.root / "iterations").glob("iter_*/evidence.json"):
             costs = dict((read_json(path).get("metadata") or {}).get("costs") or {})
-            total += float(costs.get("unit_test_wall_seconds") or 0.0)
+            total += float(costs.get(key) or 0.0)
         return total
 
     @property
@@ -860,39 +744,3 @@ class OptimizationLoop:
         if self.benchmark_plan is None:
             raise RuntimeError("benchmark plan has not been prepared")
         return self.benchmark_plan
-
-
-def _unit_profile(evidence: EvidenceRecord, config: ProjectConfig) -> str:
-    unit = (
-        "unit+"
-        if evidence.public_gain >= config.decision.min_public_gain
-        and evidence.hidden_gain >= config.decision.min_hidden_gain
-        else "unit-"
-    )
-    bridge = (
-        "bridge+"
-        if evidence.metadata.get("has_bridge")
-        and evidence.bridge_gain >= config.decision.min_bridge_gain
-        else "bridge0"
-    )
-    regression = (
-        "regression+"
-        if evidence.regression_loss <= config.decision.max_regression_loss
-        else "regression-"
-    )
-    return f"{unit}|{bridge}|{regression}"
-
-
-def _calibration_stratum(evidence: EvidenceRecord) -> str:
-    if evidence.search_delta is None:
-        search = "search?"
-    elif evidence.search_delta > 0:
-        search = "search+"
-    elif evidence.search_delta == 0:
-        search = "search0"
-    else:
-        search = "search-"
-    composition = (
-        "composition+" if evidence.metadata.get("composition_ids") else "composition0"
-    )
-    return f"{search}|{composition}"
