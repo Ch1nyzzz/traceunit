@@ -121,19 +121,21 @@ required before making any per-capability credit claim.
 
 ## 7. Online UT-design memory
 
-C3 reflects after each completed candidate-parent search comparison:
+C3 stages each completed candidate-parent search comparison for the next Test
+Author, which is also the memory writer:
 
 ~~~
 frozen packet + aggregate local evidence + categorical search outcome
-    -> sanitized UT Critic recommendation
+    -> staged pending digest
+    -> next Test Author's self-reflection (before it designs the new packet)
     -> append-only episode
     -> chronological world_model.md
-    -> next Test Author
 ~~~
 
-The critic receives no task IDs, task content, exact paired delta, final data,
-or L0 ranking. The world model is guidance for writing later tests; it cannot
-override current trace evidence.
+The digest contains no task IDs, task content, exact paired delta, final data,
+or L0 ranking. A missing or malformed reflection degrades to a rule-based
+fallback lesson and can never fail an iteration. The world model is guidance
+for writing later tests; it cannot override current trace evidence.
 
 Episodes are idempotent by (candidate_id, iteration). The world model keeps
 recent deduplicated lessons by iteration, not lexicographic ordering.

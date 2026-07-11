@@ -61,22 +61,11 @@ class OptimizationLoop:
             if config.capabilities.generated_packets
             else None
         )
-        self.ut_critic_agent = (
-            supplied.get("ut_critic")
-            or (
-                build_agent(config.agents.ut_critic)
-                if config.agents.ut_critic.enabled
-                else None
-            )
-            if config.capabilities.online_ut_memory
-            else None
-        )
         self.policy = DecisionPolicy(config.decision)
         self.ut_memory_ledger = UTMemoryLedger(self.store.ut_feedback_episodes_path)
         self.ut_memory = UTMemoryManager(
             root=self.store.memory_root,
             ledger=self.ut_memory_ledger,
-            critic=self.ut_critic_agent,
             max_lessons=config.memory.max_world_model_lessons,
             world_model_path=self.store.ut_world_model_path,
         )
@@ -147,6 +136,9 @@ class OptimizationLoop:
 
         if state.status == "running":
             state.status = "completed"
+        if self.config.capabilities.online_ut_memory:
+            # No further author run will consume the last staged digest.
+            self._commit_pending_reflection(None, source="run_end_fallback")
         self.store.save_state(state)
         summary = self._summary(state)
         write_json(self.store.root / "summary.json", summary)
@@ -200,7 +192,6 @@ class OptimizationLoop:
             self.test_author_agent,
             self.search_agent,
             self.regression_author_agent,
-            self.ut_critic_agent,
         ):
             preflight = getattr(agent, "preflight", None)
             if callable(preflight):
@@ -262,12 +253,23 @@ class OptimizationLoop:
                 "memory_version": self.ut_memory_ledger.version,
             },
         )
+        pending_reflection = (
+            self.ut_memory.pending_reflection()
+            if self.config.capabilities.online_ut_memory
+            else None
+        )
         packet, packet_path, reused = self.packet_author.get_or_author(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
             ut_memory_path=ut_memory,
+            pending_reflection=pending_reflection,
         )
+        if pending_reflection is not None and not reused:
+            self._commit_pending_reflection(
+                self.packet_author.latest_reflection(iteration_dir),
+                source="test_author",
+            )
         proposal, candidate_source, diff_text = self.candidate_builder.build(
             state=state,
             iteration=iteration,
@@ -396,25 +398,42 @@ class OptimizationLoop:
         evidence: EvidenceRecord,
         decision: DecisionRecord,
     ) -> None:
+        """Stage this iteration's outcome for the next Test Author run."""
+
         if not self.config.capabilities.online_ut_memory or evidence.metadata.get(
             "violations"
         ):
             return
-        episode = self.ut_memory.reflect_iteration(
+        staged = self.ut_memory.stage_reflection(
             iteration=iteration,
             proposal=proposal,
             packet_path=packet_path,
             evidence=evidence,
             decision=decision,
         )
+        if staged:
+            self.store.append_event(
+                "ut_reflection_staged",
+                iteration=iteration,
+                candidate_id=proposal.candidate_id,
+            )
+
+    def _commit_pending_reflection(
+        self,
+        reflection: Mapping[str, Any] | None,
+        *,
+        source: str,
+    ) -> None:
+        episode = self.ut_memory.commit_pending(reflection)
         if episode is not None:
             self.store.append_event(
                 "ut_memory_updated",
-                iteration=iteration,
-                candidate_id=proposal.candidate_id,
+                iteration=episode.iteration,
+                candidate_id=episode.candidate_id,
                 memory_version=self.ut_memory_ledger.version,
                 search_outcome=episode.search_outcome.value,
                 assessment=episode.assessment.value,
+                reflection_source=source if reflection else "fallback",
             )
 
     def _finish_iteration(

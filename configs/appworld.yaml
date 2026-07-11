@@ -51,14 +51,6 @@ agents:
     reasoning_effort: high
     timeout_s: 1800
     enabled: false
-  ut_critic:
-    provider: codex
-    isolation: docker
-    container_image: node:20-slim
-    model: gpt-5.6-terra
-    reasoning_effort: high
-    timeout_s: 1800
-    enabled: true
 
 decision:
   max_regression_loss: 0.0

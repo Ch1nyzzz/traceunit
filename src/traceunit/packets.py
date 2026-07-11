@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any, Mapping
 
 from traceunit.agents.prompts import test_author_prompt
 from traceunit.agents.runner import WorkspaceAgent
@@ -46,6 +47,7 @@ class PacketAuthor:
         iteration: int,
         iteration_dir: Path,
         ut_memory_path: Path | None,
+        pending_reflection: Path | None = None,
     ) -> tuple[TestPacket, Path, bool]:
         packet_ref = iteration_dir / "packet_ref.json"
         if packet_ref.is_file():
@@ -71,6 +73,7 @@ class PacketAuthor:
             iteration=iteration,
             iteration_dir=iteration_dir,
             ut_memory_path=ut_memory_path,
+            pending_reflection=pending_reflection,
         )
         write_json(
             packet_ref,
@@ -94,6 +97,22 @@ class PacketAuthor:
             raise TestDesignFailure(f"frozen TestPacket hash mismatch: {path}")
         return packet
 
+    @staticmethod
+    def latest_reflection(iteration_dir: Path) -> Mapping[str, Any] | None:
+        """Return the newest attempt's reflection.json, if the author wrote one."""
+
+        paths = sorted(
+            (iteration_dir / "test_author").glob("attempt_*/workspace/reflection.json")
+        )
+        for path in reversed(paths):
+            try:
+                value = read_json(path)
+            except (OSError, ValueError):
+                continue
+            if isinstance(value, Mapping):
+                return value
+        return None
+
     def _author(
         self,
         *,
@@ -101,6 +120,7 @@ class PacketAuthor:
         iteration: int,
         iteration_dir: Path,
         ut_memory_path: Path | None,
+        pending_reflection: Path | None,
     ) -> tuple[TestPacket, Path]:
         feedback = ""
         for attempt in range(1, self.config.loop.max_attempts_per_packet + 1):
@@ -122,11 +142,22 @@ class PacketAuthor:
             memory_copy = workspace / "ut_design_world_model.md"
             if ut_memory_path is not None and not memory_copy.exists():
                 shutil.copy2(ut_memory_path, memory_copy)
+            outcome_copy = workspace / "previous_outcome.json"
+            if pending_reflection is not None and not outcome_copy.exists():
+                shutil.copy2(pending_reflection, outcome_copy)
             prompt = test_author_prompt(
                 benchmark_context=self.benchmark.context(),
                 trace_manifest=trace_manifest,
                 incumbent_source=incumbent_copy,
                 ut_memory_path=(memory_copy if ut_memory_path is not None else None),
+                previous_outcome_path=(
+                    outcome_copy if pending_reflection is not None else None
+                ),
+                reflection_output_path=(
+                    workspace / "reflection.json"
+                    if pending_reflection is not None
+                    else None
+                ),
                 output_dir=output,
             )
             if feedback:

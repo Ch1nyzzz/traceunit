@@ -21,9 +21,10 @@ For each iteration:
    its local contract fails. This produces the feedback needed to improve later
    UT design rather than selectively observing only already-good packets.
 6. The controller promotes, archives, quarantines, or rejects the candidate.
-7. In C3, a sanitized critic reflection over the frozen packet, aggregate local
-   evidence, and a categorical search outcome updates the world model consumed
-   by the next Test Author.
+7. In C3, the next Test Author reflects on a sanitized digest of the frozen
+   packet, aggregate local evidence, and a categorical search outcome before
+   designing its own packet; the harness commits the reflection into the world
+   model it consumes.
 
 The final pool is sealed during search. It is opened only by
 `traceunit final-evaluate`.

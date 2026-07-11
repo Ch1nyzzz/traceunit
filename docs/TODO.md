@@ -17,9 +17,9 @@ must not be described as completed paper evidence.
 
 ## P0 before claiming UT-design learning
 
-- Validate UT Critic outputs against a strict schema and reject recommendations
-  containing task IDs, candidate IDs, exact natural deltas, or unverifiable
-  benchmark-specific claims.
+- Validate Test Author reflections against a strict schema and reject
+  recommendations containing task IDs, candidate IDs, exact natural deltas, or
+  unverifiable benchmark-specific claims.
 - Add a prospective C3-versus-C2 ablation. A useful result is improvement in
   later hidden siblings, bridges, model-backed probes, unit/natural agreement,
   or sealed final performance—not a high score assigned to an L0 direction.

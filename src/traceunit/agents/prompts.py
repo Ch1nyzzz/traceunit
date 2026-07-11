@@ -15,6 +15,8 @@ def test_author_prompt(
     incumbent_source: Path,
     ut_memory_path: Path | None,
     output_dir: Path,
+    previous_outcome_path: Path | None = None,
+    reflection_output_path: Path | None = None,
 ) -> str:
     example = {
         "packet_id": "iter001_verification_contract",
@@ -116,11 +118,36 @@ def test_author_prompt(
         if ut_memory_path is not None
         else "No online UT-design memory is available in this condition."
     )
+    reflection_block = ""
+    if previous_outcome_path is not None and reflection_output_path is not None:
+        reflection_example = {
+            "assessment": "likely_test_gap",
+            "suspected_gap": "the packet checked critic invocation but not critique adoption",
+            "recommendation": (
+                "For similar traces, test counterexample discovery, delivery to the solver, "
+                "and a resulting correction; vary the hidden edge case structurally."
+            ),
+            "alternative_explanation": "the candidate may have overfit the visible contract",
+            "confidence": "low",
+        }
+        reflection_block = f"""
+Before designing the new packet, close the loop on the previous iteration:
+- previous packet outcome digest: {previous_outcome_path}
+First write {reflection_output_path} as JSON:
+{json.dumps(reflection_example, indent=2, ensure_ascii=False)}
+assessment is exactly one of likely_test_gap, likely_edit_overfit, trajectory_interaction, or
+insufficient_evidence; confidence is low, medium, or high. A unit/search mismatch does not prove
+the tests were wrong, and composition outcomes have low attribution: derive interaction or bridge
+lessons and never rank L0 families. The recommendation must be a transferable test-design rule,
+not a task-, repository-, or benchmark-specific fact. Then apply your own lesson to the packet
+you design next.
+"""
     return f"""You are the Test Author in a trace-conditioned optimization protocol.
 
 Author a causal TestPacket before any candidate edit or composition plan exists. Diagnose at
 least two trace-supported hypotheses, choose one, and distinguish it from the alternatives.
 The tests measure agent policy behavior; they must not solve or grade benchmark tasks.
+{reflection_block}
 
 Choose family only from the frozen L0 registry:
 {prompt_definitions()}
@@ -251,35 +278,6 @@ Author implementation-independent regression/admission tests under {output_dir}.
 must pass the incumbent and use tier 'regression' or 'admission'. Set
 metadata.packet_kind='regression'. Do not access benchmark graders, gold data, search/final
 tasks, or network resources. Run all tests against the incumbent before finishing.
-"""
-
-
-def ut_critic_prompt(*, reflection_input: Path, output_path: Path) -> str:
-    example = {
-        "assessment": "likely_test_gap",
-        "suspected_gap": "the packet checked critic invocation but not critique adoption",
-        "recommendation": (
-            "For similar traces, test counterexample discovery, delivery to the solver, "
-            "and a resulting correction; vary the hidden edge case structurally."
-        ),
-        "alternative_explanation": "the candidate may have overfit the visible contract",
-        "confidence": "low",
-    }
-    return f"""You are the controller-side UT Critic. Diagnose how an earlier frozen TestPacket
-could be improved; do not repair source and do not rank L0 directions.
-
-Sanitized online search-feedback summary: {reflection_input}
-
-The input contains only a coarse natural label, frozen test-design metadata, and aggregate unit
-evidence. It deliberately contains no search-pool task content, task-level outcome, exact natural
-delta, final artifact, or family score. A unit/natural mismatch does not prove the UT was wrong.
-Choose exactly one assessment: likely_test_gap, likely_edit_overfit, trajectory_interaction, or
-insufficient_evidence. Composition outcomes have low attribution: derive only interaction/bridge
-test lessons and never blame or credit one L0 direction. Recommendations must be general test-design
-rules, not candidate-, task-, repository-, or benchmark-answer-specific facts.
-
-Write {output_path} as JSON:
-{json.dumps(example, indent=2, ensure_ascii=False)}
 """
 
 

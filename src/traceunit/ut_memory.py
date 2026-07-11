@@ -6,8 +6,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
-from traceunit.agents.prompts import ut_critic_prompt
-from traceunit.agents.runner import WorkspaceAgent
 from traceunit.io import append_jsonl, read_json, read_jsonl, write_json
 from traceunit.models import (
     AttributionScope,
@@ -177,24 +175,32 @@ class UTMemoryLedger:
 
 
 class UTMemoryManager:
-    """Reflect on each completed search comparison and update future UT design."""
+    """Stage each completed comparison for the next Test Author's self-reflection.
+
+    The Test Author is the memory writer: at the start of the next iteration it
+    reads the staged outcome digest, writes its own reflection, and the harness
+    commits the episode. Reflection quality can never fail an iteration - a
+    missing or malformed reflection degrades to a rule-based fallback lesson.
+    """
 
     def __init__(
         self,
         *,
         root: Path,
         ledger: UTMemoryLedger,
-        critic: WorkspaceAgent | None,
         max_lessons: int,
         world_model_path: Path,
     ) -> None:
         self.root = root
         self.ledger = ledger
-        self.critic = critic
         self.max_lessons = max_lessons
         self.world_model_path = world_model_path
+        self.pending_path = root / "pending_reflection.json"
 
-    def reflect_iteration(
+    def pending_reflection(self) -> Path | None:
+        return self.pending_path if self.pending_path.is_file() else None
+
+    def stage_reflection(
         self,
         *,
         iteration: int,
@@ -202,24 +208,30 @@ class UTMemoryManager:
         packet_path: Path,
         evidence: EvidenceRecord,
         decision: DecisionRecord,
-    ) -> UTFeedbackEpisode | None:
+    ) -> bool:
         if evidence.primary_family is None or evidence.search_delta is None:
-            return None
+            return False
         if (proposal.candidate_id, iteration) in {
             item.identity for item in self.ledger.episodes
         }:
-            return None
+            return False
+        if self.pending_path.is_file():
+            stale = read_json(self.pending_path)
+            if (
+                str(stale.get("candidate_id")),
+                int(stale.get("iteration") or 0),
+            ) != (proposal.candidate_id, iteration):
+                # The author never ran on the stale digest; keep its lesson via
+                # the fallback before overwriting.
+                self.commit_pending(None)
 
         packet = load_test_packet(packet_path)
         outcome = _search_outcome(evidence.search_delta)
-        workspace = (
-            self.root / "reflections" / f"iter_{iteration:03d}" / proposal.candidate_id
-        )
-        input_path = workspace / "reflection_input.json"
-        output_path = workspace / "reflection.json"
         write_json(
-            input_path,
+            self.pending_path,
             {
+                "candidate_id": proposal.candidate_id,
+                "iteration": iteration,
                 "primary_family": evidence.primary_family.value,
                 "intervention_kind": evidence.intervention_kind.value,
                 "attribution_scope": evidence.attribution_scope.value,
@@ -252,17 +264,26 @@ class UTMemoryManager:
                 "committed_decision": decision.decision.value,
             },
         )
-        raw = self._run_critic(
-            workspace=workspace, input_path=input_path, output_path=output_path
-        )
-        if not raw:
-            raw = _fallback_reflection(
-                outcome=outcome,
-                local_contract_passed=evidence.contract_passed,
-                attribution_scope=evidence.attribution_scope,
-            )
-            write_json(output_path, raw)
+        return True
 
+    def commit_pending(
+        self, reflection: Mapping[str, object] | None
+    ) -> UTFeedbackEpisode | None:
+        if not self.pending_path.is_file():
+            return None
+        pending = read_json(self.pending_path)
+        outcome = SearchOutcome(str(pending["search_outcome"]))
+        attribution_scope = AttributionScope(str(pending["attribution_scope"]))
+        local_contract_passed = bool(pending["local_contract_passed"])
+        raw: Mapping[str, object] = (
+            reflection
+            if isinstance(reflection, Mapping) and reflection
+            else _fallback_reflection(
+                outcome=outcome,
+                local_contract_passed=local_contract_passed,
+                attribution_scope=attribution_scope,
+            )
+        )
         try:
             assessment = ReflectionAssessment(str(raw.get("assessment") or ""))
         except ValueError:
@@ -271,14 +292,17 @@ class UTMemoryManager:
         if confidence not in {"low", "medium", "high"}:
             confidence = "low"
         episode = UTFeedbackEpisode(
-            candidate_id=proposal.candidate_id,
-            iteration=iteration,
-            primary_family=evidence.primary_family,
-            intervention_kind=evidence.intervention_kind,
-            attribution_scope=evidence.attribution_scope,
-            component_families=evidence.component_families,
-            local_contract_passed=evidence.contract_passed,
-            bridge_contract_passed=evidence.bridge_contract_passed,
+            candidate_id=str(pending["candidate_id"]),
+            iteration=int(pending["iteration"]),
+            primary_family=UnitFamily(str(pending["primary_family"])),
+            intervention_kind=InterventionKind(str(pending["intervention_kind"])),
+            attribution_scope=attribution_scope,
+            component_families=tuple(
+                UnitFamily(str(item))
+                for item in pending.get("component_families") or []
+            ),
+            local_contract_passed=local_contract_passed,
+            bridge_contract_passed=bool(pending["bridge_contract_passed"]),
             search_outcome=outcome,
             assessment=assessment,
             suspected_gap=str(raw.get("suspected_gap") or ""),
@@ -291,6 +315,7 @@ class UTMemoryManager:
             self.world_model_path,
             max_lessons=self.max_lessons,
         )
+        self.pending_path.unlink(missing_ok=True)
         return episode
 
     def ensure_world_model(self) -> None:
@@ -298,29 +323,6 @@ class UTMemoryManager:
             self.world_model_path,
             max_lessons=self.max_lessons,
         )
-
-    def _run_critic(
-        self,
-        *,
-        workspace: Path,
-        input_path: Path,
-        output_path: Path,
-    ) -> Mapping[str, object]:
-        if self.critic is None:
-            return {}
-        run = self.critic.run(
-            role="ut_critic",
-            prompt=ut_critic_prompt(
-                reflection_input=input_path,
-                output_path=output_path,
-            ),
-            workspace=workspace,
-            log_dir=workspace / "agent",
-        )
-        if run.returncode != 0 or run.timed_out or not output_path.is_file():
-            return {}
-        value = read_json(output_path)
-        return value if isinstance(value, Mapping) else {}
 
 
 def _search_outcome(delta: float) -> SearchOutcome:

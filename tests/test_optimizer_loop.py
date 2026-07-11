@@ -126,6 +126,20 @@ class FakeBenchmark(BenchmarkAdapter):
 class TestAuthor:
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "test_author"
+        if "reflection.json" in prompt:
+            assert (workspace / "previous_outcome.json").is_file()
+            write_json(
+                workspace / "reflection.json",
+                {
+                    "assessment": "likely_test_gap",
+                    "suspected_gap": "the bridge did not exercise adoption",
+                    "recommendation": (
+                        "Fake author lesson: vary the hidden sibling structurally."
+                    ),
+                    "alternative_explanation": "the edit may have overfit",
+                    "confidence": "medium",
+                },
+            )
         output = workspace / "output"
         public = output / "tests/public/target.py"
         hidden = output / "tests/hidden/sibling.py"
@@ -457,6 +471,79 @@ def test_full_condition_reflects_each_completed_search_comparison(
     assert content.count("\n") >= 4
     assert "\\n" not in content
     assert not (config.loop.run_dir / "calibration").exists()
+
+
+def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
+    summary = OptimizationLoop(
+        config,
+        # iter1 archives (flat search), iter2 promotes: both iterations author a
+        # fresh packet, so iter2's author consumes iter1's staged digest.
+        benchmark=LatentFlipBenchmark(tmp_path, natural_gain=False),
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+
+    store = RunStore(config.loop.run_dir)
+    episodes = {
+        item["iteration"]: item
+        for item in (
+            json.loads(line)
+            for line in store.ut_feedback_episodes_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        )
+    }
+    assert summary["ut_feedback_episodes"] == 2
+    # Iteration 1's lesson was written by the next iteration's Test Author.
+    assert episodes[1]["recommendation"].startswith("Fake author lesson")
+    assert episodes[1]["confidence"] == "medium"
+    # The final iteration has no later author run; the run-end fallback covers it.
+    assert not episodes[2]["recommendation"].startswith("Fake author lesson")
+    assert "Fake author lesson" in store.ut_world_model_path.read_text(
+        encoding="utf-8"
+    )
+    assert not (store.memory_root / "pending_reflection.json").exists()
+
+
+def test_commit_pending_tolerates_malformed_reflection(tmp_path: Path) -> None:
+    from traceunit.ut_memory import UTMemoryLedger, UTMemoryManager
+
+    root = tmp_path / "memory"
+    root.mkdir()
+    manager = UTMemoryManager(
+        root=root,
+        ledger=UTMemoryLedger(root / "episodes.jsonl"),
+        max_lessons=8,
+        world_model_path=root / "world_model.md",
+    )
+    write_json(
+        root / "pending_reflection.json",
+        {
+            "candidate_id": "iter001_candidate",
+            "iteration": 1,
+            "primary_family": "verification",
+            "intervention_kind": "local_repair",
+            "attribution_scope": "atomic",
+            "component_families": [],
+            "local_contract_passed": True,
+            "bridge_contract_passed": True,
+            "search_outcome": "improved",
+            "committed_decision": "promote",
+        },
+    )
+    episode = manager.commit_pending(
+        {
+            "assessment": "made_up_value",
+            "recommendation": "still recorded",
+            "confidence": "certain",
+        }
+    )
+    assert episode is not None
+    assert episode.assessment.value == "insufficient_evidence"
+    assert episode.confidence == "low"
+    assert episode.recommendation == "still recorded"
+    assert not (root / "pending_reflection.json").exists()
+    assert manager.commit_pending(None) is None
 
 
 def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> None:
