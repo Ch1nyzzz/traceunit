@@ -96,7 +96,13 @@ class CandidateBuilder:
             raise CandidateBuildError(
                 "candidate build is incomplete; missing proposal or source"
             )
-        proposal = CandidateProposal.from_dict(read_json(proposal_path))
+        try:
+            proposal = CandidateProposal.from_dict(read_json(proposal_path))
+        except (KeyError, ValueError) as exc:
+            # Quarantine the malformed file so a resumed run re-runs the editor
+            # instead of re-parsing the same bad proposal forever.
+            proposal_path.rename(proposal_path.with_suffix(".invalid.json"))
+            raise CandidateBuildError(f"invalid proposal.json: {exc}") from exc
         if proposal.candidate_id != candidate_id:
             raise CandidateBuildError(
                 f"proposal candidate {proposal.candidate_id!r} does not match "

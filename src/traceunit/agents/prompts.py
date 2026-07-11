@@ -213,8 +213,8 @@ def candidate_edit_prompt(
     proposal = {
         "candidate_id": candidate_id,
         "parent_id": parent_id,
-        "hypothesis_id": "copy from public packet",
-        "intervention_kind": "copy from target hypothesis",
+        "hypothesis_id": "h1",
+        "intervention_kind": "capability_augmentation",
         "mechanism_claim": "falsifiable mechanism-level change",
         "predicted_effect": "expected unit/search effect",
         "regression_risks": ["behavior that could regress"],
@@ -252,6 +252,9 @@ smoke check.
 
 Write {proposal_path}:
 {json.dumps(proposal, indent=2, ensure_ascii=False)}
+Copy hypothesis_id and intervention_kind verbatim from the public packet's target
+hypothesis; intervention_kind must be exactly one of local_repair,
+capability_augmentation, or orchestration_change, never free text.
 """
 
 
