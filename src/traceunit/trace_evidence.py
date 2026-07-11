@@ -51,8 +51,11 @@ def stage_search_trace_evidence(
             )
         raise NoFailureTraces
 
-    successful = [row for row in rows if bool(row.get("passed"))][:2]
-    selected = failed[:max_failure_traces] + successful
+    successful = [row for row in rows if bool(row.get("passed"))]
+    successful.sort(
+        key=lambda row: (-float(row.get("score") or 0.0), str(row.get("task_id")))
+    )
+    selected = failed[:max_failure_traces] + successful[:max_failure_traces]
     destination.mkdir(parents=True, exist_ok=True)
     staged: list[dict[str, Any]] = []
     for row in selected:

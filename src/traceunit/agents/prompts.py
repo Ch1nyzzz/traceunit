@@ -125,7 +125,9 @@ Benchmark contract:
 {benchmark_context}
 
 Inputs:
-- normalized trace evidence: {trace_manifest}
+- normalized trace evidence: {trace_manifest} (failing traces worst-first and passing
+  traces best-first, flagged by "passed"; skim the manifest and choose which traces to
+  read in depth, using passing traces as behavioral contrast)
 - incumbent source: {incumbent_source}
 {memory_input}
 

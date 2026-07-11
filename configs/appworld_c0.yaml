@@ -1,13 +1,13 @@
 loop:
-  run_dir: ../runs/appworld_traceunit
-  run_id: appworld_traceunit
+  run_dir: ../runs/appworld_scoreonly
+  run_id: appworld_scoreonly
   iterations: 20
   resume: true
   max_failure_traces: 16
   max_attempts_per_packet: 4
 
 protocol:
-  condition: c3_full
+  condition: c0_score_only
 
 benchmark:
   name: appworld
