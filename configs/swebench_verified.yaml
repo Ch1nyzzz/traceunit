@@ -15,7 +15,7 @@ benchmark:
   baseline_source_path: /data/home/yuhan/WorldCalib/references/vendor/mini-swe-agent
   search_data_path: /data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json
   search_limit: 50
-  final_limit: 100
+  final_limit: 137
   benchmark_seed: 1729
   search_fraction: 0.60
   model: deepseek-v4-flash

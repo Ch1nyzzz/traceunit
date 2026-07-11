@@ -17,7 +17,7 @@ benchmark:
   search_split: train
   heldout_split: test
   search_limit: 45
-  final_limit: 60
+  final_limit: 90
   benchmark_seed: 1729
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com
