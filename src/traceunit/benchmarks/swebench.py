@@ -23,14 +23,13 @@ from traceunit.benchmarks.pools import (
     load_benchmark_plan,
     load_pool_items,
     pool_identity,
-    take_cluster_groups,
 )
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
-ADAPTER_CACHE_VERSION = 5
+ADAPTER_CACHE_VERSION = 6
 SWEBENCH_HARNESS_SPEC = "swebench==4.1.0"
 _SAFE_TRACE_METRIC_KEYS = {
     "repo",
@@ -88,11 +87,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
                     f"files; missing={missing}"
                 )
             pools = {
-                name: _representative_order(
-                    _load_rows(configured_path),
-                    seed=self.config.benchmark_seed,
-                    namespace=name,
-                )
+                name: _load_rows(configured_path)
                 for name, configured_path in configured.items()
                 if configured_path is not None
             }
@@ -115,10 +110,16 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             "search": self.config.search_limit,
             "final": self.config.final_limit,
         }
-        pools = {
-            name: take_cluster_groups(items, limits[name], cluster_key=_repo_cluster)
-            for name, items in pools.items()
-        }
+        # Interleave repositories before taking the limit prefix so no single
+        # large repository (django alone holds 231 Verified tasks) can dominate
+        # a pool; cross-pool leakage is already prevented by the repo-level
+        # split, so within-pool selection does not need whole clusters.
+        for name, items in list(pools.items()):
+            ordered = _representative_order(
+                items, seed=self.config.benchmark_seed, namespace=name
+            )
+            limit = limits[name]
+            pools[name] = ordered[:limit] if limit > 0 else ordered
         if not pools["search"] or not pools["final"]:
             raise ValueError("SWE-bench search and final pools must be non-empty")
         _validate_disjoint_pools(pools)

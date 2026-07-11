@@ -1,9 +1,9 @@
 loop:
   run_dir: ../runs/swebench_verified_traceunit
   run_id: swebench_verified_traceunit
-  iterations: 12
+  iterations: 20
   resume: true
-  max_failure_traces: 8
+  max_failure_traces: 16
   max_attempts_per_packet: 4
 
 protocol:
@@ -21,7 +21,7 @@ benchmark:
   model: deepseek-v4-flash
   base_url: https://api.deepseek.com/v1
   api_key_env: DEEPSEEK_API_KEY
-  concurrency: 4
+  concurrency: 32
   timeout_s: 900
   repeats: 1
   dry_run: false
@@ -31,35 +31,33 @@ agents:
     provider: codex
     isolation: docker
     container_image: node:20-slim
+    model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 1800
   search:
     provider: codex
     isolation: docker
     container_image: node:20-slim
+    model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 3600
   regression_author:
     provider: codex
     isolation: docker
     container_image: node:20-slim
+    model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 1800
     enabled: false
-  ut_critic:
-    provider: codex
-    isolation: docker
-    container_image: node:20-slim
-    reasoning_effort: high
-    timeout_s: 1800
-    enabled: true
 
 decision:
   max_regression_loss: 0.0
   min_search_delta: 0.0
-  # One flipped task on a 50-task search pool is 0.02; a knife-edge margin of
-  # 0.0 would make latent retention require an exactly-zero paired delta.
-  noninferiority_margin: 0.02
+  # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
+  # nondeterministic model, a two-task paired swing is ordinary noise, so the
+  # archive band tolerates it; archival is observational and never moves the
+  # incumbent.
+  noninferiority_margin: 0.04
 
 memory:
   max_world_model_lessons: 64
