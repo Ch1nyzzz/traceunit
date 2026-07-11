@@ -70,6 +70,16 @@ def test_author_prompt(
                 "expected_candidate_pass": True,
             },
             {
+                "case_id": "downstream_bridge",
+                "tier": "bridge",
+                "evidence_role": "downstream_bridge",
+                "execution_mode": "deterministic",
+                "path": "tests/hidden/test_bridge.py",
+                "driver": "python",
+                "expected_incumbent_pass": False,
+                "expected_candidate_pass": True,
+            },
+            {
                 "case_id": "existing_behavior",
                 "tier": "regression",
                 "evidence_role": "off_target_control",
@@ -139,6 +149,14 @@ Write under {output_dir}:
 - test_packet.json
 - tests/public/* for exactly one visible reproducer
 - tests/hidden/* for structural siblings, bridge probes, admission checks, and regressions
+
+Directories and tiers are independent: only the public reproducer lives under tests/public/,
+every other file lives under tests/hidden/, and each case keeps its own tier. Every tier pairs
+with exactly one evidence_role: public=target_reproducer, hidden=structural_sibling,
+bridge=downstream_bridge, admission=positive_witness, regression=preservation_control or
+off_target_control. No other evidence_role values exist. Keep status="proposed" and
+content_sha256="" exactly as in the template; the harness freezes and hashes the packet after
+admission.
 
 Deterministic tests receive TRACEUNIT_SOURCE, TRACEUNIT_TEST_BUNDLE, and TRACEUNIT_SUBJECT. Use
 'python' or 'pytest'; do not use network, evaluator APIs, gold data, held-out artifacts, or task

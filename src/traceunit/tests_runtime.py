@@ -90,6 +90,10 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
         raise InvalidTestPacket(
             "admitted packet is not bound to the frozen L0 ontology"
         )
+    if packet.status is not TestStatus.ADMITTED and packet.content_sha256:
+        raise InvalidTestPacket(
+            "content_sha256 must stay empty until the harness freezes the packet"
+        )
     regression_only = packet.metadata.get("packet_kind") == "regression"
     hypothesis_ids = {item.hypothesis_id for item in packet.hypotheses}
     if not hypothesis_ids:

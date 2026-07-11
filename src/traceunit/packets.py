@@ -103,7 +103,7 @@ class PacketAuthor:
         ut_memory_path: Path | None,
     ) -> tuple[TestPacket, Path]:
         feedback = ""
-        for attempt in range(1, 3):
+        for attempt in range(1, self.config.loop.max_attempts_per_packet + 1):
             workspace = (
                 iteration_dir / "test_author" / f"attempt_{attempt}" / "workspace"
             )
@@ -156,18 +156,22 @@ class PacketAuthor:
             except InvalidTestPacket as exc:
                 feedback = str(exc)
                 continue
-            incumbent_results = run_test_cases(
-                packet=packet,
-                bundle=output,
-                source=Path(state.incumbent_source),
-                subject="incumbent",
-                output_dir=iteration_dir
-                / "test_author"
-                / f"attempt_{attempt}"
-                / "admission",
-                python=self.config.benchmark.unit_python,
-                probe_runner=self.benchmark.run_agent_probe,
-            )
+            try:
+                incumbent_results = run_test_cases(
+                    packet=packet,
+                    bundle=output,
+                    source=Path(state.incumbent_source),
+                    subject="incumbent",
+                    output_dir=iteration_dir
+                    / "test_author"
+                    / f"attempt_{attempt}"
+                    / "admission",
+                    python=self.config.benchmark.unit_python,
+                    probe_runner=self.benchmark.run_agent_probe,
+                )
+            except InvalidTestPacket as exc:
+                feedback = str(exc)
+                continue
             admitted, reasons = admission_contract(packet, incumbent_results)
             write_json(
                 iteration_dir
