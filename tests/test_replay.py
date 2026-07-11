@@ -40,7 +40,6 @@ def _frozen_packet_bundle(bundle: Path) -> str:
         {
             "packet_id": "latent-packet",
             "version": 1,
-            "source_trace_ids": ["trace"],
             "hypotheses": [
                 {
                     "hypothesis_id": "h1",

@@ -100,15 +100,10 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
         raise InvalidTestPacket("at least one failure hypothesis is required")
     if packet.target_hypothesis_id not in hypothesis_ids:
         raise InvalidTestPacket("target_hypothesis_id is not present in hypotheses")
-    declared_traces = set(packet.source_trace_ids)
     for hypothesis in packet.hypotheses:
         if not hypothesis.evidence_trace_ids:
             raise InvalidTestPacket(
                 f"{hypothesis.hypothesis_id}: evidence_trace_ids must not be empty"
-            )
-        if not set(hypothesis.evidence_trace_ids) <= declared_traces:
-            raise InvalidTestPacket(
-                f"{hypothesis.hypothesis_id}: evidence trace is not declared by packet"
             )
         if not 0.0 <= hypothesis.confidence <= 1.0:
             raise InvalidTestPacket(

@@ -100,7 +100,6 @@ def _write_packet(bundle: Path) -> None:
         {
             "packet_id": "packet",
             "version": 1,
-            "source_trace_ids": ["trace"],
             "hypotheses": [
                 {
                     "hypothesis_id": "h1",

@@ -213,7 +213,6 @@ class TestCaseSpec:
 class TestPacket:
     packet_id: str
     version: int
-    source_trace_ids: tuple[str, ...]
     hypotheses: tuple[FailureHypothesis, ...]
     target_hypothesis_id: str
     primary_family: UnitFamily | None
@@ -245,7 +244,6 @@ class TestPacket:
         return cls(
             packet_id=str(value["packet_id"]),
             version=int(value.get("version") or 1),
-            source_trace_ids=tuple(str(x) for x in value.get("source_trace_ids") or []),
             hypotheses=tuple(
                 FailureHypothesis.from_dict(item)
                 for item in value.get("hypotheses") or []

@@ -19,7 +19,6 @@ def test_author_prompt(
     example = {
         "packet_id": "iter001_verification_contract",
         "version": 1,
-        "source_trace_ids": ["trace-id"],
         "hypotheses": [
             {
                 "hypothesis_id": "h1",

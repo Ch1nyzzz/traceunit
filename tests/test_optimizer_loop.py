@@ -152,7 +152,6 @@ class TestAuthor:
             {
                 "packet_id": "behavior-packet",
                 "version": 1,
-                "source_trace_ids": ["trace"],
                 "hypotheses": [
                     {
                         "hypothesis_id": "h1",
