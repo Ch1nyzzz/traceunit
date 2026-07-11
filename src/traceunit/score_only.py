@@ -7,6 +7,7 @@ from typing import Any
 from traceunit.agents.prompts import score_only_edit_prompt
 from traceunit.agents.runner import WorkspaceAgent
 from traceunit.benchmarks.base import BenchmarkAdapter
+from traceunit.candidate import CandidateBuildError
 from traceunit.config import ProjectConfig
 from traceunit.evaluation import mechanical_violations
 from traceunit.io import copy_source, read_json, source_diff, write_json
@@ -24,8 +25,8 @@ from traceunit.store import RunStore
 from traceunit.trace_evidence import stage_search_trace_evidence
 
 
-class ScoreOnlyBuildError(RuntimeError):
-    pass
+class ScoreOnlyBuildError(CandidateBuildError):
+    """Skips the iteration via the shared candidate-build failure path."""
 
 
 class ScoreOnlyCandidateBuilder:
@@ -101,7 +102,11 @@ class ScoreOnlyCandidateBuilder:
                 f"proposal parent {proposal.parent_id!r} does not match "
                 f"{state.incumbent_id!r}"
             )
-        return proposal, source, source_diff(Path(state.incumbent_source), source)
+        try:
+            diff_text = source_diff(Path(state.incumbent_source), source)
+        except ValueError as exc:
+            raise ScoreOnlyBuildError(str(exc)) from exc
+        return proposal, source, diff_text
 
     def _history(self) -> dict[str, Any]:
         decisions = []

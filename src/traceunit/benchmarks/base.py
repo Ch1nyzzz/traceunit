@@ -15,6 +15,10 @@ from traceunit.ontology import ontology_ref
 
 class BenchmarkAdapter(ABC):
     name: str
+    #: Whether run_agent_probe is implemented. Gates model_backed_probe cases
+    #: at authoring time so an unsupported probe is retry feedback for the
+    #: Test Author, not an admission-time crash.
+    supports_agent_probe: bool = False
 
     def preflight(self) -> None:
         """Fail before expensive evaluation when runtime prerequisites are absent."""

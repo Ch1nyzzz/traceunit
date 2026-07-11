@@ -107,14 +107,18 @@ def source_diff(before: Path, after: Path) -> str:
     for relative in sorted(relative_paths):
         old_path = before / relative
         new_path = after / relative
+        old_bytes = old_path.read_bytes() if old_path.is_file() else None
+        new_bytes = new_path.read_bytes() if new_path.is_file() else None
+        if old_bytes == new_bytes:
+            # Unchanged files never need a representation, so untouched binary
+            # assets in the source tree cannot fail the diff.
+            continue
         old = _text_lines(old_path)
         new = _text_lines(new_path)
         if old is None or new is None:
             raise ValueError(
                 f"binary source changes cannot be represented safely: {relative}"
             )
-        if old == new:
-            continue
         chunks.extend(
             difflib.unified_diff(
                 old,

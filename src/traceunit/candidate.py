@@ -126,11 +126,11 @@ class CandidateBuilder:
             raise CandidateBuildError(
                 "proposal intervention_kind does not match the frozen hypothesis"
             )
-        return (
-            proposal,
-            source,
-            source_diff(Path(state.incumbent_source), source),
-        )
+        try:
+            diff_text = source_diff(Path(state.incumbent_source), source)
+        except ValueError as exc:
+            raise CandidateBuildError(str(exc)) from exc
+        return proposal, source, diff_text
 
     def public_history(self) -> dict[str, Any]:
         decisions: list[dict[str, Any]] = []

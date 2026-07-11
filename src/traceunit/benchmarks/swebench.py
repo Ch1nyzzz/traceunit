@@ -12,6 +12,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
+if __package__ in (None, ""):
+    # Executed directly as the sealed patch-evaluation worker (see
+    # _default_eval_command); make the in-repo package importable regardless
+    # of the caller's environment.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
     load_cached_evaluation,
@@ -29,7 +35,7 @@ from traceunit.io import sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
-ADAPTER_CACHE_VERSION = 6
+ADAPTER_CACHE_VERSION = 7
 SWEBENCH_HARNESS_SPEC = "swebench==4.1.0"
 _SAFE_TRACE_METRIC_KEYS = {
     "repo",

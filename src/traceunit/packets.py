@@ -9,7 +9,12 @@ from traceunit.agents.runner import WorkspaceAgent
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.config import ProjectConfig
 from traceunit.io import copy_source, read_json, write_json
-from traceunit.models import RunState, TestPacket, TestStatus
+from traceunit.models import (
+    RunState,
+    TestExecutionMode,
+    TestPacket,
+    TestStatus,
+)
 from traceunit.store import RunStore
 from traceunit.trace_evidence import stage_search_trace_evidence
 from traceunit.tests_runtime import (
@@ -158,6 +163,7 @@ class PacketAuthor:
                     if pending_reflection is not None
                     else None
                 ),
+                probes_supported=self.benchmark.supports_agent_probe,
                 output_dir=output,
             )
             if feedback:
@@ -186,6 +192,15 @@ class PacketAuthor:
                 packet = load_test_packet(output)
             except InvalidTestPacket as exc:
                 feedback = str(exc)
+                continue
+            if not self.benchmark.supports_agent_probe and any(
+                case.execution_mode is TestExecutionMode.MODEL_BACKED_PROBE
+                for case in packet.cases
+            ):
+                feedback = (
+                    "this benchmark does not support model_backed_probe cases; "
+                    "every case must be deterministic"
+                )
                 continue
             try:
                 incumbent_results = run_test_cases(

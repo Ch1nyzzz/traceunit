@@ -17,6 +17,7 @@ def test_author_prompt(
     output_dir: Path,
     previous_outcome_path: Path | None = None,
     reflection_output_path: Path | None = None,
+    probes_supported: bool = False,
 ) -> str:
     example = {
         "packet_id": "iter001_verification_contract",
@@ -118,6 +119,14 @@ def test_author_prompt(
         if ut_memory_path is not None
         else "No online UT-design memory is available in this condition."
     )
+    probe_guidance = (
+        "For model-backed capability behavior, write a declarative JSON probe, set "
+        "execution_mode='model_backed_probe' and driver='agent_probe', and declare "
+        "strict max_model_calls and max_tokens."
+        if probes_supported
+        else "This benchmark does not support model-backed probes: every case must "
+        "use execution_mode='deterministic'."
+    )
     reflection_block = ""
     if previous_outcome_path is not None and reflection_output_path is not None:
         reflection_example = {
@@ -188,9 +197,8 @@ Deterministic tests receive TRACEUNIT_SOURCE, TRACEUNIT_TEST_BUNDLE, and TRACEUN
 'python' or 'pytest'; do not use network, evaluator APIs, gold data, held-out artifacts, or task
 ids. Include a public target, a structurally varied hidden target, a positive-witness
 intervention, and an off-target regression. Add a downstream bridge whenever it can be represented
-without a grader. For model-backed capability behavior, write a declarative JSON probe, set
-execution_mode='model_backed_probe' and driver='agent_probe', and declare strict max_model_calls
-and max_tokens. Generated code must never call a model API or access credentials.
+without a grader. {probe_guidance} Generated code must never call a model API or access
+credentials.
 Prefer mutation-based contracts that test counterexample discovery, critique adoption, and final
 correction rather than merely checking that a critic/debate component exists. Run every supported
 test against the incumbent before finishing. Do not edit the incumbent.
