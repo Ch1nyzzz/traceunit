@@ -85,7 +85,6 @@ class CandidateEvaluator:
                 "unit_test_wall_seconds": 0.0,
                 "model_probe_calls": 0,
                 "model_probe_tokens": 0,
-                "natural_task_tokens": 0.0,
             },
         }
         if violations:
@@ -208,7 +207,6 @@ class CandidateEvaluator:
                     "unit_test_wall_seconds": unit_seconds,
                     "model_probe_calls": probe_calls,
                     "model_probe_tokens": probe_tokens,
-                    "natural_task_tokens": 0.0,
                 },
             }
         )
@@ -243,9 +241,6 @@ class CandidateEvaluator:
         )
         search_delta = sum(differences) / len(differences) if differences else 0.0
         metadata = dict(evidence.metadata)
-        costs = dict(metadata["costs"])
-        costs["natural_task_tokens"] = candidate_eval.cost
-        metadata["costs"] = costs
         metadata["search"] = {
             "candidate_score": candidate_eval.score,
             "candidate_passrate": candidate_eval.passrate,

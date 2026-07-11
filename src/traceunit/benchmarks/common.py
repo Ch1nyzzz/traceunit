@@ -10,11 +10,14 @@ from traceunit.io import write_json
 from traceunit.models import BenchmarkEvaluation, TaskOutcome, TraceEvent, TraceRun
 
 
+_ARTIFACT_CHAR_LIMIT = 100_000
+
 _SAFE_TRACE_METRICS = {
     "agent_exit_code",
     "apply_error",
     "benchmark",
     "base_commit",
+    "dry_run",
     "duration_s",
     "empty_patch",
     "error_tail",
@@ -65,7 +68,6 @@ def normalize_worldcalib_result(
     split: str,
     candidate_id: str,
     out_dir: Path,
-    artifact_limit: int = 100_000,
 ) -> BenchmarkEvaluation:
     """Convert the task-result envelope and raw dumps into TraceRun JSONL."""
 
@@ -97,9 +99,9 @@ def normalize_worldcalib_result(
                 resolved = evidence.resolve()
                 artifact_paths.append(str(resolved))
                 text = resolved.read_text(encoding="utf-8", errors="replace")
-                was_truncated = len(text) > artifact_limit
+                was_truncated = len(text) > _ARTIFACT_CHAR_LIMIT
                 if was_truncated:
-                    half = artifact_limit // 2
+                    half = _ARTIFACT_CHAR_LIMIT // 2
                     text = text[:half] + "\n...[middle truncated]...\n" + text[-half:]
                 events.append(
                     TraceEvent(

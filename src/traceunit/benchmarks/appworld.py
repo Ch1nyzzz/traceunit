@@ -22,6 +22,8 @@ from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
     load_benchmark_plan,
     load_pool_items,
+    pool_identity,
+    take_cluster_groups,
 )
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
@@ -83,8 +85,12 @@ class AppWorldAdapter(BenchmarkAdapter):
             raw = json.loads(source_manifest.read_text(encoding="utf-8"))
             search = list(raw.get(self.config.search_split) or raw.get("train") or [])
             final = list(raw.get(self.config.heldout_split) or raw.get("test") or [])
-        search = _take_scenario_groups(search, self.config.search_limit)
-        final = _take_scenario_groups(final, self.config.final_limit)
+        search = take_cluster_groups(
+            search, self.config.search_limit, cluster_key=_scenario_id
+        )
+        final = take_cluster_groups(
+            final, self.config.final_limit, cluster_key=_scenario_id
+        )
         if not search or not final:
             raise ValueError("AppWorld search and final pools must be non-empty")
         _validate_disjoint_pools(search, final)
@@ -207,7 +213,6 @@ sealed process scores the persisted environment state after candidate execution 
                 "candidate_id": candidate_id,
                 "scaffold_name": "appworld_agent",
                 "passrate": passrate,
-                "average_score": passrate,
                 "token_consuming": total_prompt + total_completion,
                 "count": len(task_rows),
                 "config": {
@@ -219,13 +224,6 @@ sealed process scores the persisted environment state after candidate execution 
                 },
             },
             "tasks": task_rows,
-            "score_breakdown": {
-                "all": {
-                    "count": len(task_rows),
-                    "passrate": passrate,
-                    "average_score": passrate,
-                }
-            },
         }
         result_path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -256,13 +254,7 @@ sealed process scores the persisted environment state after candidate execution 
                 sha256_file(appworld_init) if appworld_init.is_file() else "missing"
             ),
             "source_sha256": source_hash,
-            "pool": {
-                "slice_id": pool.slice_id,
-                "role": pool.role.value,
-                "manifest_sha256": pool.manifest_sha256,
-                "cluster_ids": pool.cluster_ids,
-                "ordinal": pool.ordinal,
-            },
+            "pool": pool_identity(pool),
             "model": self.config.model,
             "base_url": self.config.base_url,
             "api_key_env": self.config.api_key_env,
@@ -690,13 +682,11 @@ def _aggregate_repetitions(
             {
                 "task_id": task_id,
                 "question": str(public_task.get("instruction") or task_id),
-                "gold_answer": "",
                 "prediction": f"{sum(successes)}/{len(successes)} pass",
                 "score": score,
                 "passed": bool(successes) and sum(successes) * 2 >= len(successes),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
-                "retrieved": [],
                 "metadata": {
                     "benchmark": "appworld",
                     "ground_truth_isolated": True,
@@ -724,9 +714,7 @@ def _scenario_id(task_id: str) -> str:
     return task_id.rsplit("_", 1)[0]
 
 
-def _load_task_ids(path: Path | None) -> list[str]:
-    if path is None:
-        raise ValueError("AppWorld pool path is required")
+def _load_task_ids(path: Path) -> list[str]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(payload, list):
         values = payload
@@ -749,48 +737,18 @@ def _load_task_ids(path: Path | None) -> list[str]:
     return task_ids
 
 
-def _take_scenario_groups(task_ids: list[str], limit: int) -> list[str]:
-    if not limit or len(task_ids) <= limit:
-        return task_ids
-    selected: list[str] = []
-    ordered_scenarios = list(
-        dict.fromkeys(_scenario_id(task_id) for task_id in task_ids)
-    )
-    for scenario in ordered_scenarios:
-        group = [item for item in task_ids if _scenario_id(item) == scenario]
-        if selected and len(selected) + len(group) > limit:
-            break
-        selected.extend(group)
-    return selected
-
-
-def _validate_disjoint_pools(
-    search: list[str],
-    final: list[str],
-) -> None:
-    pools = {
-        "search": set(search),
-        "final": set(final),
+def _validate_disjoint_pools(search: list[str], final: list[str]) -> None:
+    if len(set(search)) != len(search):
+        raise ValueError("AppWorld search pool contains duplicate task ids")
+    if len(set(final)) != len(final):
+        raise ValueError("AppWorld final pool contains duplicate task ids")
+    overlap = set(search) & set(final)
+    if overlap:
+        raise ValueError(f"AppWorld search/final pools overlap: {sorted(overlap)[:3]}")
+    scenario_overlap = {_scenario_id(task_id) for task_id in search} & {
+        _scenario_id(task_id) for task_id in final
     }
-    for name, values in pools.items():
-        source = {
-            "search": search,
-            "final": final,
-        }[name]
-        if len(values) != len(source):
-            raise ValueError(f"AppWorld {name} pool contains duplicate task ids")
-    pairs = (("search", "final"),)
-    for left, right in pairs:
-        overlap = pools[left] & pools[right]
-        if overlap:
-            raise ValueError(
-                f"AppWorld {left}/{right} pools overlap: {sorted(overlap)[:3]}"
-            )
-        scenario_overlap = {_scenario_id(task_id) for task_id in pools[left]} & {
-            _scenario_id(task_id) for task_id in pools[right]
-        }
-        if scenario_overlap:
-            raise ValueError(
-                f"AppWorld {left}/{right} scenarios overlap: "
-                f"{sorted(scenario_overlap)[:3]}"
-            )
+    if scenario_overlap:
+        raise ValueError(
+            f"AppWorld search/final scenarios overlap: {sorted(scenario_overlap)[:3]}"
+        )

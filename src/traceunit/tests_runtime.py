@@ -86,9 +86,7 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
     claimed_ontology = packet.metadata.get("ontology")
     if claimed_ontology is not None and not validate_ontology_ref(claimed_ontology):
         raise InvalidTestPacket("packet claims an unknown L0 ontology version or hash")
-    if packet.status is TestStatus.ADMITTED and not validate_ontology_ref(
-        claimed_ontology
-    ):
+    if packet.status is TestStatus.ADMITTED and claimed_ontology is None:
         raise InvalidTestPacket(
             "admitted packet is not bound to the frozen L0 ontology"
         )
@@ -711,11 +709,7 @@ def _docker_argv(
     cidfile: Path,
     runtime_site: Path | None,
 ) -> list[str]:
-    docker = shutil.which("docker")
-    if not docker:
-        raise TestSandboxUnavailable(
-            "Docker executable disappeared after sandbox probe"
-        )
+    docker = shutil.which("docker") or "docker"
     argv = [
         docker,
         "run",
@@ -773,11 +767,7 @@ def _bwrap_argv(
     inside_argv: list[str],
     python: str,
 ) -> list[str]:
-    bwrap = shutil.which("bwrap")
-    if not bwrap:
-        raise TestSandboxUnavailable(
-            "bubblewrap executable disappeared after sandbox probe"
-        )
+    bwrap = shutil.which("bwrap") or "bwrap"
     argv = [
         bwrap,
         "--die-with-parent",

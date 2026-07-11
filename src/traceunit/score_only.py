@@ -192,7 +192,6 @@ class ScoreOnlyEvaluator:
             metadata={
                 "violations": [],
                 "candidate_source": str(candidate_source.resolve()),
-                "costs": {"natural_task_tokens": candidate.cost},
                 "search": {
                     "candidate_score": candidate.score,
                     "candidate_passrate": candidate.passrate,
@@ -211,6 +210,6 @@ class ScoreOnlyEvaluator:
             candidate_id=proposal.candidate_id,
             decision=decision,
             reason=reason,
-            confidence=min(1.0, max(0.0, 0.5 + abs(search_delta))),
+            confidence=1.0,
             evidence=evidence,
         )

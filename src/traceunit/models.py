@@ -184,7 +184,6 @@ class TestCaseSpec:
     description: str = ""
     max_model_calls: int = 0
     max_tokens: int = 0
-    repetitions: int = 1
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "TestCaseSpec":
@@ -207,7 +206,6 @@ class TestCaseSpec:
             description=str(value.get("description") or ""),
             max_model_calls=max(0, int(value.get("max_model_calls") or 0)),
             max_tokens=max(0, int(value.get("max_tokens") or 0)),
-            repetitions=max(1, int(value.get("repetitions") or 1)),
         )
 
 
@@ -324,7 +322,6 @@ class PoolSliceRef:
     manifest_path: str
     manifest_sha256: str
     cluster_ids: tuple[str, ...]
-    ordinal: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -340,7 +337,6 @@ class PoolSliceRef:
             manifest_path=str(value["manifest_path"]),
             manifest_sha256=str(value["manifest_sha256"]),
             cluster_ids=tuple(str(item) for item in value.get("cluster_ids") or []),
-            ordinal=int(value.get("ordinal") or 0),
         )
 
 

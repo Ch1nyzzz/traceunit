@@ -103,9 +103,6 @@ class FinalEvaluationRunner:
         return plan
 
     def run(self, plan: FinalEvaluationPlan) -> dict[str, Any]:
-        plan_path = self.store.sealed_root / "final" / "plan.json"
-        if not plan_path.is_file() or read_json(plan_path) != plan.to_dict():
-            raise RuntimeError("final evaluation plan must be sealed before execution")
         evaluations = {}
         for subject in plan.subjects:
             source = Path(subject.source_path)

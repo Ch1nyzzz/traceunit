@@ -56,7 +56,6 @@ class BenchmarkConfig:
     timeout_s: int = 900
     max_interactions: int = 100
     agent_command: str = ""
-    evaluator_command: str = ""
     unit_python: Path | None = None
     dataset_name: str = "princeton-nlp/SWE-bench_Verified"
     dataset_split: str = "test"
@@ -106,8 +105,6 @@ class LoopConfig:
     resume: bool = True
     max_failure_traces: int = 8
     max_attempts_per_packet: int = 4
-    max_trace_chars_per_artifact: int = 100_000
-    retain_agent_logs: bool = True
 
 
 @dataclass(frozen=True)
@@ -205,10 +202,6 @@ def load_config(path: Path) -> ProjectConfig:
         resume=bool(loop_raw.get("resume", True)),
         max_failure_traces=max(1, int(loop_raw.get("max_failure_traces", 8))),
         max_attempts_per_packet=max(1, int(loop_raw.get("max_attempts_per_packet", 4))),
-        max_trace_chars_per_artifact=max(
-            1_000, int(loop_raw.get("max_trace_chars_per_artifact", 100_000))
-        ),
-        retain_agent_logs=bool(loop_raw.get("retain_agent_logs", True)),
     )
 
     worldcalib_root = (
@@ -238,7 +231,6 @@ def load_config(path: Path) -> ProjectConfig:
         timeout_s=max(1, int(benchmark_raw.get("timeout_s", 900))),
         max_interactions=max(1, int(benchmark_raw.get("max_interactions", 100))),
         agent_command=str(benchmark_raw.get("agent_command") or ""),
-        evaluator_command=str(benchmark_raw.get("evaluator_command") or ""),
         unit_python=_path(base, benchmark_raw.get("unit_python")),
         dataset_name=str(
             benchmark_raw.get("dataset_name", "princeton-nlp/SWE-bench_Verified")

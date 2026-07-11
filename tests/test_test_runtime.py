@@ -208,7 +208,6 @@ def test_model_probe_is_host_controlled_and_budget_checked(
             "execution_mode": "model_backed_probe",
             "max_model_calls": 2,
             "max_tokens": 100,
-            "repetitions": 2,
         }
     )
     write_json(bundle / "tests/public/probe.json", {"probe": "counterexample"})

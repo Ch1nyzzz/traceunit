@@ -33,6 +33,20 @@ class WorkspaceAgent(Protocol):
     ) -> AgentRunResult: ...
 
 
+_DEFAULT_IMAGES = {
+    "codex": "node:20-slim",
+    "claude": "docker-claude:latest",
+}
+
+
+def _resolve_image(config: AgentConfig) -> str:
+    provider = config.provider.strip().lower()
+    image = config.container_image or _DEFAULT_IMAGES.get(provider, "")
+    if not image:
+        raise RuntimeError(f"no container image configured for provider {provider!r}")
+    return image
+
+
 class CommandWorkspaceAgent:
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
@@ -44,12 +58,7 @@ class CommandWorkspaceAgent:
         if not docker:
             raise RuntimeError("agent isolation=docker requires Docker")
         provider = self.config.provider.strip().lower()
-        image = self.config.container_image or {
-            "codex": "node:20-slim",
-            "claude": "docker-claude:latest",
-        }.get(provider, "")
-        if not image:
-            raise RuntimeError(f"no container image configured for {provider!r}")
+        image = _resolve_image(self.config)
         try:
             inspected = subprocess.run(
                 [docker, "image", "inspect", image],
@@ -233,14 +242,7 @@ class CommandWorkspaceAgent:
         if not docker:
             raise RuntimeError("agent isolation=docker requires Docker")
         provider = self.config.provider.strip().lower()
-        image = self.config.container_image or {
-            "codex": "node:20-slim",
-            "claude": "docker-claude:latest",
-        }.get(provider, "")
-        if not image:
-            raise RuntimeError(
-                f"agents using provider {provider!r} need container_image"
-            )
+        image = _resolve_image(self.config)
         cidfile = log_dir / "container.cid"
         cidfile.unlink(missing_ok=True)
         outer_env = {

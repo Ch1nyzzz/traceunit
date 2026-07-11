@@ -22,17 +22,15 @@ from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
     load_benchmark_plan,
     load_pool_items,
+    pool_identity,
+    take_cluster_groups,
 )
 from traceunit.config import BenchmarkConfig
 from traceunit.io import sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
-LOCAL_VERIFIED_DATA = Path(
-    "/data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json"
-)
-
-ADAPTER_CACHE_VERSION = 4
+ADAPTER_CACHE_VERSION = 5
 SWEBENCH_HARNESS_SPEC = "swebench==4.1.0"
 _SAFE_TRACE_METRIC_KEYS = {
     "repo",
@@ -100,8 +98,6 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             }
         else:
             source_path = self.config.search_data_path
-            if source_path is None and LOCAL_VERIFIED_DATA.is_file():
-                source_path = LOCAL_VERIFIED_DATA
             if source_path is not None and source_path.is_file():
                 rows = _load_rows(source_path)
             else:
@@ -120,7 +116,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
             "final": self.config.final_limit,
         }
         pools = {
-            name: _take_cluster_groups(items, limits[name])
+            name: take_cluster_groups(items, limits[name], cluster_key=_repo_cluster)
             for name, items in pools.items()
         }
         if not pools["search"] or not pools["final"]:
@@ -140,11 +136,6 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
     def preflight(self) -> None:
         if self.config.dry_run:
             return
-        if self.config.evaluator_command:
-            raise RuntimeError(
-                "custom SWE evaluator_command is disabled because it cannot guarantee "
-                "patch-specific official report identity"
-            )
         if self.config.repeats != 1:
             raise RuntimeError(
                 "SWE-bench adapter currently supports repeats=1; repeated evaluations "
@@ -180,11 +171,6 @@ official SWE-bench harness."""
         pool: PoolSliceRef,
         out_dir: Path,
     ) -> BenchmarkEvaluation:
-        if self.config.evaluator_command:
-            raise RuntimeError(
-                "custom SWE evaluator_command is disabled; use the adapter-owned "
-                "patch-specific official evaluator"
-            )
         if self._plan is None:
             raise RuntimeError("prepare() must be called before evaluate()")
         known = (self._plan.search, self._plan.final)
@@ -226,8 +212,6 @@ official SWE-bench harness."""
                 project_root=self.config.worldcalib_root,
             )
             candidate = {
-                "name": DEFAULT_MINI_SWE_AGENT_NAME,
-                "agent_name": DEFAULT_MINI_SWE_AGENT_NAME,
                 "source_project_path": str(source.resolve()),
                 "source_sha256": source_hash,
                 "evaluation_fingerprint": cache_fingerprint,
@@ -355,25 +339,16 @@ def _evaluation_cache_fingerprint(
         "adapter_cache_version": ADAPTER_CACHE_VERSION,
         "swebench_harness_spec": SWEBENCH_HARNESS_SPEC,
         "source_sha256": source_hash,
-        "pool": {
-            "slice_id": pool.slice_id,
-            "role": pool.role.value,
-            "manifest_sha256": pool.manifest_sha256,
-            "cluster_ids": pool.cluster_ids,
-            "ordinal": pool.ordinal,
-        },
+        "pool": pool_identity(pool),
         "model": config.model,
         "base_url": config.base_url,
         "api_key_env": config.api_key_env,
         "timeout_s": config.timeout_s,
         "concurrency": config.concurrency,
-        "repeats": config.repeats,
-        "max_interactions": config.max_interactions,
         "dry_run": config.dry_run,
         "dataset_name": config.dataset_name,
         "dataset_split": config.dataset_split,
         "agent_command": config.agent_command,
-        "evaluator_command": config.evaluator_command,
         "worldcalib_runner_sha256": (
             sha256_file(worldcalib_runner) if worldcalib_runner.is_file() else "missing"
         ),
@@ -409,22 +384,6 @@ def _repo_cluster(row: Mapping[str, Any]) -> str:
     if not instance_id:
         raise ValueError("SWE-bench row is missing instance_id/task_id")
     return f"instance:{instance_id}"
-
-
-def _take_cluster_groups(
-    rows: list[dict[str, Any]], limit: int
-) -> list[dict[str, Any]]:
-    if limit <= 0 or len(rows) <= limit:
-        return list(rows)
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        groups.setdefault(_repo_cluster(row), []).append(row)
-    selected: list[dict[str, Any]] = []
-    for group in groups.values():
-        if selected and len(selected) + len(group) > limit:
-            break
-        selected.extend(group)
-    return selected
 
 
 def _representative_order(

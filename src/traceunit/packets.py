@@ -49,13 +49,13 @@ class PacketAuthor:
     ) -> tuple[TestPacket, Path, bool]:
         packet_ref = iteration_dir / "packet_ref.json"
         if packet_ref.is_file():
-            path = Path(str(read_json(packet_ref)["path"]))
-            packet = self._verified(path)
-            return packet, path, bool(read_json(packet_ref).get("reused"))
+            ref = read_json(packet_ref)
+            path = Path(str(ref["path"]))
+            return self.verified(path), path, bool(ref.get("reused"))
         if state.active_packet_path:
             path = Path(state.active_packet_path)
             try:
-                packet = self._verified(path)
+                packet = self.verified(path)
             except TestDesignFailure:
                 packet = None
             if packet is not None and packet.status == TestStatus.ADMITTED:
@@ -88,7 +88,7 @@ class PacketAuthor:
         state.active_packet_path = ""
         state.active_packet_uses = 0
 
-    def _verified(self, path: Path) -> TestPacket:
+    def verified(self, path: Path) -> TestPacket:
         packet = load_test_packet(path)
         if not verify_frozen_packet(path, packet):
             raise TestDesignFailure(f"frozen TestPacket hash mismatch: {path}")
@@ -187,7 +187,7 @@ class PacketAuthor:
             library_path = self.store.root / "test_library" / name
             if not library_path.exists():
                 shutil.copytree(output, library_path)
-            frozen = self._verified(library_path)
+            frozen = self.verified(library_path)
             self.store.append_event(
                 "test_packet_admitted",
                 iteration=iteration,

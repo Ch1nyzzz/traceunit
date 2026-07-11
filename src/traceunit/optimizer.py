@@ -345,7 +345,7 @@ class OptimizationLoop:
             raise RuntimeError("decision evidence does not match evidence.json")
         proposal = CandidateProposal.from_dict(read_json(proposal_path))
         packet_path = Path(str(read_json(packet_ref_path)["path"]))
-        packet = self.packet_author._verified(packet_path)
+        packet = self.packet_author.verified(packet_path)
         candidate_source = Path(
             str(
                 evidence.metadata.get(

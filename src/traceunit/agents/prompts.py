@@ -143,8 +143,8 @@ Deterministic tests receive TRACEUNIT_SOURCE, TRACEUNIT_TEST_BUNDLE, and TRACEUN
 ids. Include a public target, a structurally varied hidden target, a positive-witness
 intervention, and an off-target regression. Add a downstream bridge whenever it can be represented
 without a grader. For model-backed capability behavior, write a declarative JSON probe, set
-execution_mode='model_backed_probe' and driver='agent_probe', and declare strict max_model_calls,
-max_tokens, and repetitions. Generated code must never call a model API or access credentials.
+execution_mode='model_backed_probe' and driver='agent_probe', and declare strict max_model_calls
+and max_tokens. Generated code must never call a model API or access credentials.
 Prefer mutation-based contracts that test counterexample discovery, critique adoption, and final
 correction rather than merely checking that a critic/debate component exists. Run every supported
 test against the incumbent before finishing. Do not edit the incumbent.
