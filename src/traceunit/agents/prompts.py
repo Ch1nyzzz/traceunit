@@ -240,10 +240,10 @@ def candidate_edit_prompt(
     parent_id: str,
     source_dir: Path,
     public_packet_path: Path,
-    latent_capabilities_path: Path | None,
+    history_path: Path | None = None,
+    archives_path: Path | None = None,
     proposal_path: Path,
     target_api_env: str | None = None,
-    leads_path: Path | None = None,
 ) -> str:
     proposal = {
         "candidate_id": candidate_id,
@@ -255,29 +255,18 @@ def candidate_edit_prompt(
         "regression_risks": ["behavior that could regress"],
         "metadata": {"notes": ""},
     }
-    latent_input = (
-        f"Latent capabilities: {latent_capabilities_path}"
-        if latent_capabilities_path is not None
-        else "Latent capabilities: none available in this condition"
-    )
-    latent_guidance = (
-        "Each latent capability is a previously certified but not yet promoted behavior "
-        "contract, with a reference patch from the source tree it was written against. "
-        "You may realize any of them alongside the new mechanism edit when they genuinely "
-        "fit; treat the patch as reference material, never as something to apply blindly. "
-        "Realization is measured afterwards by replaying each latent capability's frozen "
-        "tests — there is nothing to declare."
-        if latent_capabilities_path is not None
+    history_input = (
+        f"Prior decisions and search deltas: {history_path}"
+        if history_path is not None
         else ""
     )
-    leads_guidance = (
-        f"Leads: {leads_path}\n"
-        "Each lead is an earlier rejected edit whose paired search score improved but "
-        "whose frozen contract failed: a rewarded yet uncertified direction, with its "
-        "diff as reference material. Rebuild a lead's mechanism when it genuinely serves "
-        "the current frozen contract; never apply a diff blindly, and the current public "
-        "contract remains the target."
-        if leads_path is not None
+    archives_guidance = (
+        f"Archived earlier candidates: {archives_path}\n"
+        "Each archive record is an earlier edit worth reading: either its unit "
+        "contract passed while paired search stayed flat, or its paired search "
+        "improved while its unit contract failed. Read the records and rebuild "
+        "whatever you judge valuable; never apply a diff blindly."
+        if archives_path is not None
         else ""
     )
     return f"""You are the Candidate Editor.
@@ -287,11 +276,10 @@ Benchmark contract:
 
 Editable source: {source_dir}
 Public frozen TestPacket: {public_packet_path}
-{latent_input}
+{history_input}
+{archives_guidance}
 
 Implement one general mechanism-level edit that repairs the frozen public contract.
-{latent_guidance}
-{leads_guidance}
 Generalize beyond the visible reproducer. Do not inspect hidden tests, search-pool tasks,
 final tasks, evaluators, gold data, or task ids. Run the public test and a syntax/import
 smoke check before finishing; do not submit an edit whose public test still fails.

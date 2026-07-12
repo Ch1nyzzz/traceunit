@@ -82,11 +82,6 @@ class DecisionConfig:
     max_regression_loss: float = 0.0
     min_search_delta: float = 0.0
     noninferiority_margin: float = 0.0
-    # After this many iterations, a candidate that fails its frozen unit
-    # contract (or breaks preservation/regressions) is rejected without a
-    # paired search evaluation. 0 disables screening; the early iterations
-    # are the calibration window that validates the UT-search fit.
-    ut_screening_after: int = 0
 
 
 class ExperimentCondition(StrEnum):
@@ -123,7 +118,13 @@ class LoopConfig:
     iterations: int = 5
     resume: bool = True
     max_failure_traces: int = 8
+    # Authoring retries: how often the Test Author may retry a packet that
+    # fails mechanical admission before the iteration is skipped.
     max_attempts_per_packet: int = 4
+    # Inner unit loop: after a proposed patch fails the frozen unit tests, the
+    # proposer receives the concrete failures and retries this many times
+    # before the (expensive) paired search evaluation runs anyway.
+    max_inner_retries: int = 3
 
 
 @dataclass(frozen=True)
@@ -235,6 +236,7 @@ def load_config(path: Path) -> ProjectConfig:
         resume=bool(loop_raw.get("resume", True)),
         max_failure_traces=max(1, int(loop_raw.get("max_failure_traces", 8))),
         max_attempts_per_packet=max(1, int(loop_raw.get("max_attempts_per_packet", 4))),
+        max_inner_retries=max(0, int(loop_raw.get("max_inner_retries", 3))),
     )
 
     worldcalib_root = (

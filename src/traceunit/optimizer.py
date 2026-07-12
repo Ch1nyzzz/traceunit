@@ -8,9 +8,9 @@ from traceunit.agents.runner import WorkspaceAgent, build_agent
 from traceunit.benchmarks import BenchmarkAdapter, build_benchmark
 from traceunit.candidate import CandidateBuildError, CandidateBuilder
 from traceunit.config import ProjectConfig
-from traceunit.decision import DecisionPolicy
+from traceunit.decision import DecisionPolicy, archive_kind, is_mismatch, unit_ok
 from traceunit.evaluation import CandidateEvaluator
-from traceunit.io import copy_source, read_json, source_diff, write_json
+from traceunit.io import copy_source, read_json, write_json
 from traceunit.replay import FrozenPacketRef, copy_packet_into_store
 from traceunit.models import (
     BenchmarkPlan,
@@ -277,14 +277,14 @@ class OptimizationLoop:
             if self.config.capabilities.online_ut_memory
             else None
         )
-        packet, packet_path, reused = self.packet_author.get_or_author(
+        packet, packet_path = self.packet_author.get_or_author(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
             ut_memory_path=ut_memory,
             pending_reflection=pending_reflection,
         )
-        if pending_reflection is not None and not reused:
+        if pending_reflection is not None:
             self._commit_pending_reflection(
                 self.packet_author.latest_reflection(iteration_dir),
                 source="test_author",
@@ -307,7 +307,6 @@ class OptimizationLoop:
             packet_path=packet_path,
             candidate_source=candidate_source,
             diff_text=diff_text,
-            packet_reused=reused,
         )
         decision = replace(decision, evidence=evidence)
         write_json(iteration_dir / "evidence.json", evidence.to_dict())
@@ -582,142 +581,183 @@ class OptimizationLoop:
             ref = self._store_packet(packet, packet_path)
             if ref.to_dict() not in state.preserved_packet_refs:
                 state.preserved_packet_refs.append(ref.to_dict())
-            self._promote_realized_latent(state, evidence)
-            PacketAuthor.retire_active(state)
         elif decision.decision is Decision.ARCHIVE:
-            if not self.config.capabilities.partial_archive:
-                raise RuntimeError("archive decision reached with archive disabled")
-            ref = self._retain_latent_packet(
+            self._retain_archive(
+                state=state,
+                iteration=iteration,
+                proposal=proposal,
+                evidence=evidence,
+                decision=decision,
+            )
+        if is_mismatch(evidence, self.config.decision):
+            self._stage_mismatch(
+                iteration=iteration,
+                proposal=proposal,
                 packet=packet,
                 packet_path=packet_path,
-                parent_source=Path(str(evidence.metadata["parent_source"])),
-                candidate_source=candidate_source,
+                evidence=evidence,
+                decision=decision,
             )
-            if ref.to_dict() not in state.latent_packet_refs:
-                state.latent_packet_refs.append(ref.to_dict())
-            self.store.append_event(
-                "latent_packet_retained",
-                candidate_id=proposal.candidate_id,
-                packet_id=ref.packet_id,
-                content_sha256=ref.content_sha256,
-            )
-            PacketAuthor.retire_active(state)
-        elif decision.decision is Decision.PARTIAL_ELIGIBLE:
-            if proposal.candidate_id not in state.partial_eligible_ids:
-                state.partial_eligible_ids.append(proposal.candidate_id)
-            PacketAuthor.retire_active(state)
-        elif decision.decision is Decision.QUARANTINE:
-            if proposal.candidate_id not in state.quarantined_ids:
-                state.quarantined_ids.append(proposal.candidate_id)
-            PacketAuthor.retire_active(state)
-        else:
-            if (
-                evidence.search_delta is not None
-                and evidence.search_delta > self.config.decision.min_search_delta
-            ):
-                self._retain_lead(
-                    state=state,
-                    iteration=iteration,
-                    proposal=proposal,
-                    evidence=evidence,
-                )
-            state.active_packet_uses += 1
-            if state.active_packet_uses >= self.config.loop.max_attempts_per_packet:
-                PacketAuthor.retire_active(state)
         state.committed_iterations.append(iteration)
         self.store.save_state(state)
         return state
 
-    def _retain_lead(
+    def _retain_archive(
         self,
         *,
         state: RunState,
         iteration: int,
         proposal: CandidateProposal,
         evidence: EvidenceRecord,
+        decision: DecisionRecord,
     ) -> None:
-        """Keep a rewarded-but-uncertified edit as editor reference material.
+        """Record an archived candidate for later agents to read and re-litigate.
 
-        The rejected diff improved paired search but failed its frozen
-        contract, so it earns no protocol status; later editors see it as a
-        lead, and certification still requires satisfying a future contract.
+        An archive is a record, not a protocol capability: nothing replays it
+        and nothing migrates it. A later proposer that finds the idea worth
+        rebuilding takes it through the normal propose -> unit -> search path.
         """
 
+        if proposal.candidate_id not in state.archived_ids:
+            state.archived_ids.append(proposal.candidate_id)
+        if not self.config.capabilities.partial_archive:
+            return
         if any(
             ref.get("candidate_id") == proposal.candidate_id
-            for ref in state.lead_refs
+            for ref in state.archive_refs
         ):
             return
+        archive_dir = self.store.archive_root / proposal.candidate_id
+        archive_dir.mkdir(parents=True, exist_ok=True)
         diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
-        if not diff_path.is_file():
-            return
-        lead_dir = self.store.leads_root / proposal.candidate_id
-        lead_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(diff_path, lead_dir / "candidate.diff")
+        if diff_path.is_file():
+            shutil.copy2(diff_path, archive_dir / "candidate.diff")
         write_json(
-            lead_dir / "lead.json",
+            archive_dir / "record.json",
             {
                 "candidate_id": proposal.candidate_id,
                 "iteration": iteration,
+                "kind": archive_kind(evidence, self.config.decision),
+                "reason": decision.reason,
                 "search_delta": evidence.search_delta,
+                "contract_passed": evidence.contract_passed,
+                "preservation_passed": evidence.preservation_passed,
+                "packet_id": evidence.packet_id,
                 "primary_family": (
                     evidence.primary_family.value if evidence.primary_family else ""
                 ),
                 "mechanism_claim": proposal.mechanism_claim,
-                "contract_reasons": list(
+                "predicted_effect": proposal.predicted_effect,
+                "unit_failure_reasons": list(
                     evidence.metadata.get("candidate_contract_reasons") or []
                 ),
             },
         )
-        state.lead_refs.append(
-            {"candidate_id": proposal.candidate_id, "path": str(lead_dir)}
+        state.archive_refs.append(
+            {"candidate_id": proposal.candidate_id, "path": str(archive_dir)}
         )
         self.store.append_event(
-            "lead_retained",
+            "candidate_archived",
             iteration=iteration,
             candidate_id=proposal.candidate_id,
+            kind=archive_kind(evidence, self.config.decision),
             search_delta=evidence.search_delta,
         )
 
-    def _retain_latent_packet(
+    def _stage_mismatch(
         self,
         *,
+        iteration: int,
+        proposal: CandidateProposal,
         packet: TestPacket,
         packet_path: Path,
-        parent_source: Path,
-        candidate_source: Path,
-    ) -> FrozenPacketRef:
-        """Keep the frozen packet as a latent capability with a reference patch."""
-
-        ref = self._store_packet(packet, packet_path)
-        patch_path = self.store.latent_root / ref.content_sha256 / "component.patch"
-        if not patch_path.is_file():
-            patch_path.parent.mkdir(parents=True, exist_ok=True)
-            patch_path.write_text(
-                source_diff(parent_source, candidate_source), encoding="utf-8"
-            )
-        return ref
-
-    def _promote_realized_latent(
-        self, state: RunState, evidence: EvidenceRecord
+        evidence: EvidenceRecord,
+        decision: DecisionRecord,
     ) -> None:
-        """Migrate latent packets the promoted candidate satisfied into preservation."""
+        """Record a unit/search disagreement for the next Test Author to diagnose.
 
-        realized = set(evidence.realized_latent)
-        still_latent: list[dict[str, str]] = []
-        for raw_ref in state.latent_packet_refs:
-            if raw_ref.get("content_sha256") in realized:
-                if raw_ref not in state.preserved_packet_refs:
-                    state.preserved_packet_refs.append(raw_ref)
-                self.store.append_event(
-                    "latent_packet_realized",
-                    candidate_id=state.incumbent_id,
-                    packet_id=raw_ref.get("packet_id"),
-                    content_sha256=raw_ref.get("content_sha256"),
-                )
-            else:
-                still_latent.append(raw_ref)
-        state.latent_packet_refs = still_latent
+        Cell 3 (unit passed, search regressed) means the UT design deviated
+        from the search distribution; cell 4 (search improved, unit failed)
+        means the UT design missed the mechanism. The next Test Author reads
+        this record, the frozen tests, and both search traces, then distills
+        why into the world model before designing its next packet.
+        """
+
+        mismatch_dir = self.store.mismatch_root / f"iter_{iteration:03d}"
+        mismatch_dir.mkdir(parents=True, exist_ok=True)
+        diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
+        if diff_path.is_file():
+            shutil.copy2(diff_path, mismatch_dir / "candidate.diff")
+        kind = (
+            "search_improved_unit_failed"
+            if not unit_ok(evidence, self.config.decision)
+            else "unit_passed_search_regressed"
+        )
+        write_json(
+            mismatch_dir / "mismatch.json",
+            {
+                "iteration": iteration,
+                "candidate_id": proposal.candidate_id,
+                "kind": kind,
+                "reason": decision.reason,
+                "decision": decision.decision.value,
+                "search_delta": evidence.search_delta,
+                "packet_id": packet.packet_id,
+                "packet_path": str(packet_path),
+                "mechanism_claim": proposal.mechanism_claim,
+                "contract_passed": evidence.contract_passed,
+                "preservation_passed": evidence.preservation_passed,
+                "unit_failure_reasons": list(
+                    evidence.metadata.get("candidate_contract_reasons") or []
+                ),
+                "task_flips": self._task_flips(
+                    parent_id=str(evidence.metadata.get("parent_id") or ""),
+                    candidate_id=proposal.candidate_id,
+                ),
+            },
+        )
+        self.store.append_event(
+            "mismatch_staged",
+            iteration=iteration,
+            candidate_id=proposal.candidate_id,
+            kind=kind,
+        )
+
+    def _task_flips(
+        self, *, parent_id: str, candidate_id: str
+    ) -> list[dict[str, Any]]:
+        """Per-task paired outcomes between the incumbent and the candidate."""
+
+        flips: list[dict[str, Any]] = []
+        try:
+            slice_id = self._plan.search.slice_id
+            parent = read_json(
+                self.store.evaluation_dir(parent_id, slice_id) / "evaluation.json"
+            )
+            candidate = read_json(
+                self.store.evaluation_dir(candidate_id, slice_id) / "evaluation.json"
+            )
+        except (OSError, ValueError, RuntimeError):
+            return flips
+        parent_by_task = {
+            str(item.get("task_id")): bool(item.get("passed"))
+            for item in parent.get("outcomes") or []
+        }
+        for item in candidate.get("outcomes") or []:
+            task_id = str(item.get("task_id"))
+            if task_id not in parent_by_task:
+                continue
+            incumbent_passed = parent_by_task[task_id]
+            candidate_passed = bool(item.get("passed"))
+            flips.append(
+                {
+                    "task_id": task_id,
+                    "incumbent_passed": incumbent_passed,
+                    "candidate_passed": candidate_passed,
+                    "flipped": incumbent_passed != candidate_passed,
+                }
+            )
+        return flips
 
     def _store_packet(self, packet: TestPacket, packet_path: Path) -> FrozenPacketRef:
         relative = copy_packet_into_store(
@@ -755,7 +795,6 @@ class OptimizationLoop:
                 "error": str(exc),
             },
         )
-        PacketAuthor.retire_active(state)
         state.next_iteration += 1
         self.store.save_state(state)
         return state
@@ -792,7 +831,6 @@ class OptimizationLoop:
                 "error": str(exc),
             },
         )
-        PacketAuthor.retire_active(state)
         state.next_iteration += 1
         self.store.save_state(state)
         return state
@@ -809,10 +847,9 @@ class OptimizationLoop:
             "incumbent_id": state.incumbent_id,
             "incumbent_search_score": state.incumbent_search_score,
             "promoted_ids": state.promoted_ids,
-            "latent_packets": list(state.latent_packet_refs),
             "preserved_packets": list(state.preserved_packet_refs),
-            "partial_eligible_ids": state.partial_eligible_ids,
-            "quarantined_ids": state.quarantined_ids,
+            "archived_ids": state.archived_ids,
+            "archive_refs": list(state.archive_refs),
             "ut_memory_version": self.ut_memory_ledger.version,
             "ut_feedback_episodes": len(self.ut_memory_ledger.episodes),
             "total_cost": state.total_cost,

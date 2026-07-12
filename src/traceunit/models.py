@@ -7,9 +7,7 @@ from typing import Any, Mapping
 
 class Decision(StrEnum):
     REJECT = "reject"
-    PARTIAL_ELIGIBLE = "partial_eligible"
     ARCHIVE = "archive"
-    QUARANTINE = "quarantine"
     PROMOTE = "promote"
 
 
@@ -600,17 +598,13 @@ class RunState:
     condition: str = "c3_full"
     capabilities: dict[str, bool] = field(default_factory=dict)
     promoted_ids: list[str] = field(default_factory=list)
-    partial_eligible_ids: list[str] = field(default_factory=list)
-    quarantined_ids: list[str] = field(default_factory=list)
     preserved_packet_refs: list[dict[str, str]] = field(default_factory=list)
-    latent_packet_refs: list[dict[str, str]] = field(default_factory=list)
-    # Rejected edits whose paired search score improved: rewarded but never
-    # certified. Kept as reference leads for later editors; certification
-    # still requires satisfying a future frozen contract.
-    lead_refs: list[dict[str, str]] = field(default_factory=list)
-    active_packet_id: str = ""
-    active_packet_path: str = ""
-    active_packet_uses: int = 0
+    # Archived candidates are records, not protocol capabilities: an edit whose
+    # contract passed while search stayed flat, or whose search improved while
+    # its contract failed. Later agents read the records and may re-litigate
+    # them through the normal propose -> unit -> search path.
+    archived_ids: list[str] = field(default_factory=list)
+    archive_refs: list[dict[str, str]] = field(default_factory=list)
     committed_iterations: list[int] = field(default_factory=list)
     search_cost: float = 0.0
     total_cost: float = 0.0
@@ -634,25 +628,15 @@ class RunState:
                 for key, item in dict(value.get("capabilities") or {}).items()
             },
             promoted_ids=[str(x) for x in value.get("promoted_ids") or []],
-            partial_eligible_ids=[
-                str(x) for x in value.get("partial_eligible_ids") or []
-            ],
-            quarantined_ids=[str(x) for x in value.get("quarantined_ids") or []],
             preserved_packet_refs=[
                 {str(key): str(item) for key, item in dict(ref).items()}
                 for ref in value.get("preserved_packet_refs") or []
             ],
-            latent_packet_refs=[
+            archived_ids=[str(x) for x in value.get("archived_ids") or []],
+            archive_refs=[
                 {str(key): str(item) for key, item in dict(ref).items()}
-                for ref in value.get("latent_packet_refs") or []
+                for ref in value.get("archive_refs") or []
             ],
-            lead_refs=[
-                {str(key): str(item) for key, item in dict(ref).items()}
-                for ref in value.get("lead_refs") or []
-            ],
-            active_packet_id=str(value.get("active_packet_id") or ""),
-            active_packet_path=str(value.get("active_packet_path") or ""),
-            active_packet_uses=int(value.get("active_packet_uses") or 0),
             search_cost=float(value.get("search_cost") or 0.0),
             committed_iterations=[
                 int(x) for x in value.get("committed_iterations") or []

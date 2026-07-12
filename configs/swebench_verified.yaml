@@ -5,6 +5,9 @@ loop:
   resume: true
   max_failure_traces: 16
   max_attempts_per_packet: 4
+  # A patch that fails the frozen unit tests goes back to the proposer with
+  # the concrete failures this many times before search runs anyway.
+  max_inner_retries: 3
 
 protocol:
   condition: c3_full
@@ -53,13 +56,9 @@ agents:
 decision:
   max_regression_loss: 0.0
   min_search_delta: 0.0
-  # Iterations 1-10 are the calibration window: every candidate gets a paired
-  # search evaluation. Afterwards a failed frozen contract rejects the
-  # candidate without the (expensive) search run.
-  ut_screening_after: 10
   # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
   # nondeterministic model, a two-task paired swing is ordinary noise, so the
-  # archive band tolerates it; archival is observational and never moves the
+  # archive band tolerates it; archival is a record and never moves the
   # incumbent.
   noninferiority_margin: 0.04
 

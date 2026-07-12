@@ -13,7 +13,6 @@ from traceunit.models import (
     RunState,
     TestExecutionMode,
     TestPacket,
-    TestStatus,
 )
 from traceunit.store import RunStore
 from traceunit.trace_evidence import stage_search_trace_evidence
@@ -53,25 +52,14 @@ class PacketAuthor:
         iteration_dir: Path,
         ut_memory_path: Path | None,
         pending_reflection: Path | None = None,
-    ) -> tuple[TestPacket, Path, bool]:
+    ) -> tuple[TestPacket, Path]:
+        """Author one fresh packet per iteration; packet_ref.json is resume-only."""
+
         packet_ref = iteration_dir / "packet_ref.json"
         if packet_ref.is_file():
             ref = read_json(packet_ref)
             path = Path(str(ref["path"]))
-            return self.verified(path), path, bool(ref.get("reused"))
-        if state.active_packet_path:
-            path = Path(state.active_packet_path)
-            try:
-                packet = self.verified(path)
-            except TestDesignFailure:
-                packet = None
-            if packet is not None and packet.status == TestStatus.ADMITTED:
-                write_json(
-                    packet_ref,
-                    {"path": str(path), "packet_id": packet.packet_id, "reused": True},
-                )
-                return packet, path, True
-            self.retire_active(state)
+            return self.verified(path), path
 
         packet, path = self._author(
             state=state,
@@ -80,21 +68,8 @@ class PacketAuthor:
             ut_memory_path=ut_memory_path,
             pending_reflection=pending_reflection,
         )
-        write_json(
-            packet_ref,
-            {"path": str(path), "packet_id": packet.packet_id, "reused": False},
-        )
-        state.active_packet_id = packet.packet_id
-        state.active_packet_path = str(path)
-        state.active_packet_uses = 0
-        self.store.save_state(state)
-        return packet, path, False
-
-    @staticmethod
-    def retire_active(state: RunState) -> None:
-        state.active_packet_id = ""
-        state.active_packet_path = ""
-        state.active_packet_uses = 0
+        write_json(packet_ref, {"path": str(path), "packet_id": packet.packet_id})
+        return packet, path
 
     def verified(self, path: Path) -> TestPacket:
         packet = load_test_packet(path)

@@ -29,9 +29,23 @@ from traceunit.store import RunStore
 
 
 class FakeBenchmark(BenchmarkAdapter):
+    """One or more synthetic tasks scored by a per-task rule on behavior.txt.
+
+    ``scorers`` maps task_id -> callable(text) -> float. The default single
+    task rewards behavior 'good' when ``natural_gain`` is set, so the stock
+    editor (writes 'good') improves paired search.
+    """
+
     name = "fake"
 
-    def __init__(self, root: Path, *, natural_gain: bool) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        natural_gain: bool,
+        search_items: list[str] | None = None,
+        scorers: dict[str, object] | None = None,
+    ) -> None:
         self.root = root
         self.natural_gain = natural_gain
         self.seed = root / "fake-seed"
@@ -39,12 +53,14 @@ class FakeBenchmark(BenchmarkAdapter):
         (self.seed / "behavior.txt").write_text("bad", encoding="utf-8")
         self.calls: list[str] = []
         self.plan: BenchmarkPlan | None = None
+        self.search_items = search_items or ["search-task"]
+        self.scorers = scorers or {}
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
         self.plan = freeze_benchmark_plan(
             root=work_dir / "benchmark_data" / "fake",
             benchmark=self.name,
-            search_items=["search-task"],
+            search_items=self.search_items,
             final_items=["final-task"],
             cluster_key=str,
         )
@@ -56,6 +72,12 @@ class FakeBenchmark(BenchmarkAdapter):
     def context(self) -> str:
         return "Fake benchmark with one public behavior file."
 
+    def _score(self, task_id: str, text: str) -> float:
+        scorer = self.scorers.get(task_id)
+        if scorer is not None:
+            return float(scorer(text))
+        return 1.0 if text == "good" and self.natural_gain else 0.0
+
     def evaluate(
         self,
         *,
@@ -65,16 +87,17 @@ class FakeBenchmark(BenchmarkAdapter):
         out_dir: Path,
     ) -> BenchmarkEvaluation:
         out_dir.mkdir(parents=True, exist_ok=True)
-        task_id = str(load_pool_items(pool)[0])
         self.calls.append(pool.slice_id)
-        good = (source / "behavior.txt").read_text().strip() == "good"
-        score = 1.0 if good and self.natural_gain else 0.0
-        artifact = out_dir / "trace.txt"
-        artifact.write_text(f"behavior={'good' if good else 'bad'}", encoding="utf-8")
-        trace_id = f"fake:{pool.slice_id}:{candidate_id}:{task_id}"
-        trace_path = out_dir / "traces.jsonl"
-        trace_path.write_text(
-            json.dumps(
+        text = (source / "behavior.txt").read_text().strip()
+        task_ids = [str(item) for item in load_pool_items(pool)]
+        outcomes = []
+        trace_rows = []
+        for task_id in task_ids:
+            score = self._score(task_id, text)
+            artifact = out_dir / f"trace_{task_id}.txt"
+            artifact.write_text(f"behavior={text}", encoding="utf-8")
+            trace_id = f"fake:{pool.slice_id}:{candidate_id}:{task_id}"
+            trace_rows.append(
                 {
                     "trace_id": trace_id,
                     "benchmark": "fake",
@@ -85,31 +108,35 @@ class FakeBenchmark(BenchmarkAdapter):
                     "passed": bool(score),
                     "status": "ok",
                     "input_summary": "make behavior good",
-                    "output_summary": f"behavior={'good' if good else 'bad'}",
+                    "output_summary": f"behavior={text}",
                     "events": [],
                     "artifact_paths": [str(artifact)],
                     "metrics": {},
                 }
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        result = BenchmarkEvaluation(
-            evaluation_id=f"fake:{pool.slice_id}:{candidate_id}",
-            benchmark="fake",
-            candidate_id=candidate_id,
-            split=pool.slice_id,
-            score=score,
-            passrate=score,
-            cost=1.0,
-            outcomes=(
+            outcomes.append(
                 TaskOutcome(
                     task_id=task_id,
                     score=score,
                     passed=bool(score),
                     trace_id=trace_id,
-                ),
-            ),
+                )
+            )
+        trace_path = out_dir / "traces.jsonl"
+        trace_path.write_text(
+            "".join(json.dumps(row) + "\n" for row in trace_rows),
+            encoding="utf-8",
+        )
+        total = sum(item.score for item in outcomes) / len(outcomes)
+        result = BenchmarkEvaluation(
+            evaluation_id=f"fake:{pool.slice_id}:{candidate_id}",
+            benchmark="fake",
+            candidate_id=candidate_id,
+            split=pool.slice_id,
+            score=total,
+            passrate=total,
+            cost=1.0,
+            outcomes=tuple(outcomes),
             trace_path=str(trace_path),
             result_path=str(out_dir / "raw.json"),
         )
@@ -375,9 +402,9 @@ def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None
     assert not store.memory_root.exists()
 
 
-def test_flat_local_improvement_is_retained_as_latent_packet(
-    tmp_path: Path,
-) -> None:
+def test_unit_pass_with_flat_search_is_archived_as_record(tmp_path: Path) -> None:
+    """Cell 2: contract passed, paired search flat -> archive a plain record."""
+
     config = _config(tmp_path)
     summary = OptimizationLoop(
         config,
@@ -385,58 +412,131 @@ def test_flat_local_improvement_is_retained_as_latent_packet(
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
     assert summary["incumbent_id"] == "baseline"
-    assert len(summary["latent_packets"]) == 1
-    ref = summary["latent_packets"][0]
+    assert summary["archived_ids"] == ["iter001_candidate"]
     store = RunStore(config.loop.run_dir)
-    bundle = store.packet_store_root / ref["path"]
-    assert (bundle / "test_packet.json").is_file()
-    patch = store.latent_root / ref["content_sha256"] / "component.patch"
-    assert patch.is_file()
-    assert "behavior.txt" in patch.read_text(encoding="utf-8")
+    archive_dir = store.archive_root / "iter001_candidate"
+    record = read_json(archive_dir / "record.json")
+    assert record["kind"] == "unit_passed_search_flat"
+    assert record["contract_passed"] is True
+    assert record["search_delta"] == 0.0
+    assert "behavior.txt" in (archive_dir / "candidate.diff").read_text()
+    # An archive is a record, not a capability: nothing is replayed later.
+    assert not (config.loop.run_dir / "mismatch").exists()
+    decision = read_json(config.loop.run_dir / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "archive"
 
 
-class LatentFlipBenchmark(FakeBenchmark):
-    """Search transfer appears only at the second opportunity."""
-
-    def evaluate(self, *, source: Path, candidate_id: str, pool, out_dir: Path):
-        self.natural_gain = candidate_id.startswith("iter002")
-        return super().evaluate(
-            source=source, candidate_id=candidate_id, pool=pool, out_dir=out_dir
-        )
-
-
-def test_promoted_candidate_realizes_latent_packet_into_preservation(
+def test_search_improvement_with_failed_contract_is_archived_and_staged(
     tmp_path: Path,
 ) -> None:
-    config = _config(tmp_path, iterations=2)
-    benchmark = LatentFlipBenchmark(tmp_path, natural_gain=False)
-    editor = SearchAgent()
-    summary = OptimizationLoop(
+    """Cell 4: search improved, contract failed -> archive + mismatch record."""
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    OptimizationLoop(
+        config,
+        # score rewards 'good', but the frozen tests demand 'great': the edit
+        # improves paired search yet fails its contract.
+        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        agents={"test_author": TestAuthor(expected="great"), "search": SearchAgent()},
+    ).run()
+
+    run = config.loop.run_dir
+    decision = read_json(run / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "archive"
+    assert "unit contract failed" in decision["reason"]
+    record = read_json(run / "archive/iter001_candidate/record.json")
+    assert record["kind"] == "search_improved_unit_failed"
+    assert record["search_delta"] > 0
+    assert record["unit_failure_reasons"]
+    mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
+    assert mismatch["kind"] == "search_improved_unit_failed"
+    assert mismatch["contract_passed"] is False
+    assert any(flip["flipped"] for flip in mismatch["task_flips"])
+    assert (run / "mismatch/iter_001/candidate.diff").is_file()
+    # The incumbent did not move.
+    state = json.loads((run / "run_state.json").read_text())
+    assert state["incumbent_id"] == "baseline"
+    assert state["archived_ids"] == ["iter001_candidate"]
+
+
+def test_unit_pass_with_search_regression_is_rejected_as_mismatch(
+    tmp_path: Path,
+) -> None:
+    """Cell 3: contract passed, paired search regressed -> reject + mismatch."""
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    benchmark = FakeBenchmark(
+        tmp_path,
+        natural_gain=False,
+        search_items=["hard-task", "fragile-task"],
+        scorers={
+            # hard-task always fails, so the baseline has a failure trace.
+            "hard-task": lambda text: 0.0,
+            # fragile-task passes on the baseline and breaks on the edit.
+            "fragile-task": lambda text: 1.0 if text == "bad" else 0.0,
+        },
+    )
+    OptimizationLoop(
         config,
         benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+
+    run = config.loop.run_dir
+    decision = read_json(run / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "reject"
+    assert "deviated from the search distribution" in decision["reason"]
+    assert decision["evidence"]["contract_passed"] is True
+    assert decision["evidence"]["search_delta"] < 0
+    mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
+    assert mismatch["kind"] == "unit_passed_search_regressed"
+    flips = {flip["task_id"]: flip for flip in mismatch["task_flips"]}
+    assert flips["fragile-task"]["flipped"] is True
+    assert flips["hard-task"]["flipped"] is False
+    state = json.loads((run / "run_state.json").read_text())
+    assert state["incumbent_id"] == "baseline"
+    assert state["archived_ids"] == []
+
+
+def test_both_failed_is_a_plain_reject(tmp_path: Path) -> None:
+    """Cell 5: contract failed and search flat -> plain reject, no records."""
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=False),
+        agents={"test_author": TestAuthor(), "search": BadEditor()},
+    ).run()
+
+    run = config.loop.run_dir
+    decision = read_json(run / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "reject"
+    assert "neither the unit contract nor paired search" in decision["reason"]
+    assert not (run / "mismatch").exists()
+    assert not (run / "archive").exists()
+
+
+def test_later_editor_sees_archive_records(tmp_path: Path) -> None:
+    config = _config(tmp_path, iterations=2)
+    editor = SearchAgent()
+    OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=False),
         agents={"test_author": TestAuthor(), "search": editor},
     ).run()
 
-    # Iteration 1 archived a latent capability; iteration 2 realized it.
-    events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
-    assert "latent_packet_retained" in events
-    assert "latent_packet_realized" in events
-    assert summary["incumbent_id"] == "iter002_candidate"
-    assert summary["latent_packets"] == []
-    preserved = {ref["content_sha256"] for ref in summary["preserved_packets"]}
-    evidence = read_json(config.loop.run_dir / "iterations/iter_002/evidence.json")
-    assert len(evidence["realized_latent"]) == 1
-    assert set(evidence["realized_latent"]) <= preserved
-    assert evidence["attribution_scope"] == "composition"
-    assert evidence["component_families"] == ["verification"]
-    # The editor was shown the latent capability and its reference patch.
-    assert any("latent_capabilities.json" in prompt for prompt in editor.prompts[1:])
-    workspace_patches = list(
-        (config.loop.run_dir / "candidates/iter002_candidate").glob(
-            "latent_capabilities/*/component.patch"
-        )
+    # Iteration 1 archived; iteration 2's editor received the staged record.
+    assert "archives.json" in editor.prompts[1]
+    staged = (
+        config.loop.run_dir
+        / "candidates/iter002_candidate/archive/iter001_candidate/candidate.diff"
     )
-    assert workspace_patches
+    assert staged.is_file()
+    archives = read_json(
+        config.loop.run_dir / "candidates/iter002_candidate/archives.json"
+    )
+    assert archives["archives"][0]["candidate_id"] == "iter001_candidate"
+    assert archives["archives"][0]["kind"] == "unit_passed_search_flat"
 
 
 def test_score_only_condition_has_no_unit_archive_or_memory_artifacts(
@@ -498,13 +598,23 @@ def test_full_condition_reflects_each_completed_search_comparison(
     assert not (config.loop.run_dir / "calibration").exists()
 
 
+class FlipBenchmark(FakeBenchmark):
+    """Search transfer appears only at the second opportunity."""
+
+    def evaluate(self, *, source: Path, candidate_id: str, pool, out_dir: Path):
+        self.natural_gain = candidate_id.startswith("iter002")
+        return super().evaluate(
+            source=source, candidate_id=candidate_id, pool=pool, out_dir=out_dir
+        )
+
+
 def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
     config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
     summary = OptimizationLoop(
         config,
         # iter1 archives (flat search), iter2 promotes: both iterations author a
         # fresh packet, so iter2's author consumes iter1's staged digest.
-        benchmark=LatentFlipBenchmark(tmp_path, natural_gain=False),
+        benchmark=FlipBenchmark(tmp_path, natural_gain=False),
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
 
@@ -528,63 +638,6 @@ def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     assert not (store.memory_root / "pending_reflection.json").exists()
-
-
-def test_rewarded_but_uncertified_reject_becomes_lead(tmp_path: Path) -> None:
-    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
-    editor = SearchAgent()
-    OptimizationLoop(
-        config,
-        # score rewards 'good', but the frozen tests demand 'great': the edit
-        # improves paired search yet fails its contract -> reject + lead.
-        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
-        agents={"test_author": TestAuthor(expected="great"), "search": editor},
-    ).run()
-
-    run = config.loop.run_dir
-    state = json.loads((run / "run_state.json").read_text())
-    assert [ref["candidate_id"] for ref in state["lead_refs"]] == [
-        "iter001_candidate",
-        "iter002_candidate",
-    ]
-    lead_dir = run / "leads/iter001_candidate"
-    assert (lead_dir / "candidate.diff").read_text().strip()
-    lead = json.loads((lead_dir / "lead.json").read_text())
-    assert lead["search_delta"] > 0 and lead["contract_reasons"]
-    events = (run / "events.jsonl").read_text()
-    assert events.count('"lead_retained"') == 2
-    # The second editor saw the first lead as reference material.
-    assert "Leads:" in editor.prompts[1]
-    staged = run / "candidates/iter002_candidate/leads/iter001_candidate"
-    assert (staged / "candidate.diff").is_file()
-
-
-def test_ut_screening_skips_search_after_calibration(tmp_path: Path) -> None:
-    from dataclasses import replace as dc_replace
-
-    from traceunit.config import DecisionConfig
-
-    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
-    config = dc_replace(config, decision=DecisionConfig(ut_screening_after=1))
-    benchmark = FakeBenchmark(tmp_path, natural_gain=False)
-    OptimizationLoop(
-        config,
-        benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": BadEditor()},
-    ).run()
-
-    # Baseline plus the iter1 calibration window evaluated the search pool;
-    # the screened iter2 did not.
-    assert benchmark.calls.count("search") == 2
-    run = config.loop.run_dir
-    d1 = json.loads((run / "iterations/iter_001/decision.json").read_text())
-    assert d1["decision"] == "reject"
-    assert d1["evidence"]["search_delta"] is not None
-    d2 = json.loads((run / "iterations/iter_002/decision.json").read_text())
-    assert d2["decision"] == "reject"
-    assert "UT screening" in d2["reason"]
-    assert d2["evidence"]["search_delta"] is None
-    assert d2["evidence"]["metadata"]["ut_screening"] is True
 
 
 def test_commit_pending_tolerates_malformed_reflection(tmp_path: Path) -> None:
@@ -657,7 +710,7 @@ def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> 
     assert store.load_state().next_iteration == 2
 
 
-def test_raw_traceunit_records_partial_eligibility_without_persisting_component(
+def test_raw_traceunit_records_archive_ids_without_persisting_records(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, ExperimentCondition.RAW_TRACEUNIT)
@@ -668,10 +721,10 @@ def test_raw_traceunit_records_partial_eligibility_without_persisting_component(
     ).run()
 
     assert summary["protocol"] == "c1_raw_traceunit"
-    assert summary["partial_eligible_ids"] == ["iter001_candidate"]
-    assert summary["latent_packets"] == []
-    assert not RunStore(config.loop.run_dir).latent_root.exists()
+    assert summary["archived_ids"] == ["iter001_candidate"]
+    assert summary["archive_refs"] == []
+    assert not (config.loop.run_dir / "archive").exists()
     assert not (config.loop.run_dir / "ut_memory").exists()
     candidate = config.loop.run_dir / "candidates/iter001_candidate"
-    assert not (candidate / "latent_capabilities.json").exists()
+    assert not (candidate / "archives.json").exists()
     assert not (candidate / "ut_design_world_model.md").exists()

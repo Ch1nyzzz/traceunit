@@ -19,8 +19,8 @@ class RunStore:
         self.ut_feedback_episodes_path = self.memory_root / "episodes.jsonl"
         self.ut_world_model_path = self.memory_root / "world_model.md"
         self.packet_store_root = self.root / "frozen_packets"
-        self.latent_root = self.packet_store_root / "latent"
-        self.leads_root = self.root / "leads"
+        self.archive_root = self.root / "archive"
+        self.mismatch_root = self.root / "mismatch"
         self.sealed_root = self.root / "sealed"
 
     def initialize(

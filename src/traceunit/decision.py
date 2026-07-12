@@ -3,29 +3,65 @@ from __future__ import annotations
 from traceunit.config import DecisionConfig
 from traceunit.models import Decision, DecisionRecord, EvidenceRecord
 
+ARCHIVE_UNIT_PASSED_SEARCH_FLAT = "unit_passed_search_flat"
+ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED = "search_improved_unit_failed"
+
+
+def unit_ok(evidence: EvidenceRecord, config: DecisionConfig) -> bool:
+    """The complete unit verdict: frozen contract, preserved contracts, regressions."""
+
+    return (
+        evidence.contract_passed
+        and evidence.preservation_passed
+        and evidence.regression_loss <= config.max_regression_loss
+    )
+
+
+def is_mismatch(evidence: EvidenceRecord, config: DecisionConfig) -> bool:
+    """Unit verdict and paired search disagree: the UT design missed the search
+    distribution (unit passed, search regressed) or missed the mechanism (search
+    improved, unit failed). Either way the next Test Author must diagnose it."""
+
+    if evidence.search_delta is None:
+        return False
+    if unit_ok(evidence, config):
+        return evidence.search_delta < -config.noninferiority_margin
+    return evidence.search_delta > config.min_search_delta
+
+
+def archive_kind(evidence: EvidenceRecord, config: DecisionConfig) -> str | None:
+    if evidence.search_delta is None:
+        return None
+    if unit_ok(evidence, config):
+        if (
+            evidence.search_delta <= config.min_search_delta
+            and evidence.search_delta >= -config.noninferiority_margin
+        ):
+            return ARCHIVE_UNIT_PASSED_SEARCH_FLAT
+        return None
+    if evidence.search_delta > config.min_search_delta:
+        return ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED
+    return None
+
 
 class DecisionPolicy:
-    """Pure policy over frozen unit, replay, and visible search evidence."""
+    """The five-cell decision table over the unit verdict and paired search.
+
+    | unit \\ search | improved | flat        | regressed          |
+    | passed         | promote  | archive     | reject (mismatch)  |
+    | failed         | archive (mismatch) | reject | reject        |
+
+    The unit contract is a cheap alignment check that the patch repaired the
+    trace-diagnosed atomic problem; paired search is the real objective. When
+    the two disagree, the candidate earns no promotion, but the disagreement
+    itself is staged for the next Test Author to diagnose.
+    """
 
     def __init__(self, config: DecisionConfig) -> None:
         self.config = config
 
     def decide(self, evidence: EvidenceRecord) -> DecisionRecord:
         cfg = self.config
-        if evidence.regression_loss > cfg.max_regression_loss:
-            return self._record(
-                evidence,
-                Decision.REJECT,
-                "the candidate broke an incumbent-passing regression",
-                1.0 - evidence.regression_loss,
-            )
-        if not evidence.preservation_passed:
-            return self._record(
-                evidence,
-                Decision.REJECT,
-                "the candidate broke a cumulative promoted capability",
-                1.0,
-            )
         if evidence.search_delta is None:
             return self._record(
                 evidence,
@@ -33,52 +69,56 @@ class DecisionPolicy:
                 "a mechanically valid candidate is missing paired search evidence",
                 0.0,
             )
-        if evidence.search_delta > cfg.min_search_delta:
-            if not evidence.contract_passed:
+        delta = evidence.search_delta
+        if unit_ok(evidence, cfg):
+            if delta > cfg.min_search_delta:
                 return self._record(
                     evidence,
-                    Decision.REJECT,
-                    "search improved but the candidate did not satisfy its frozen TestPacket",
-                    0.0,
+                    Decision.PROMOTE,
+                    "the unit contract passed and paired search improved",
+                    min(1.0, 0.5 + delta),
+                )
+            if delta >= -cfg.noninferiority_margin:
+                return self._record(
+                    evidence,
+                    Decision.ARCHIVE,
+                    "the unit contract passed and paired search was noninferior; "
+                    "kept as a record for later re-litigation",
+                    0.5,
                 )
             return self._record(
                 evidence,
-                Decision.PROMOTE,
-                "the candidate satisfied its frozen contract and improved paired search",
-                min(1.0, 0.5 + evidence.search_delta),
+                Decision.REJECT,
+                "the unit contract passed but paired search regressed: the UT "
+                "design deviated from the search distribution",
+                max(0.0, 1.0 + delta),
             )
-
-        has_bridge = bool(evidence.metadata.get("has_bridge"))
-        bridge_certified = has_bridge and evidence.bridge_contract_passed
-        if (
-            evidence.contract_passed
-            and bridge_certified
-            and evidence.search_delta >= -cfg.noninferiority_margin
-        ):
+        if delta > cfg.min_search_delta:
             return self._record(
                 evidence,
                 Decision.ARCHIVE,
-                "the frozen contract and bridge passed while paired search was noninferior",
+                "paired search improved but the unit contract failed: the patch "
+                "is kept as a record and the UT design needs diagnosis",
                 0.5,
             )
-        if evidence.contract_passed and bridge_certified:
-            return self._record(
-                evidence,
-                Decision.QUARANTINE,
-                "the frozen contract passed but paired search regressed",
-                max(0.0, 1.0 + evidence.search_delta),
-            )
-        if not evidence.contract_passed:
-            reason = "the candidate did not satisfy its frozen TestPacket"
-        elif has_bridge and not evidence.bridge_contract_passed:
-            reason = "the candidate did not satisfy its frozen downstream bridge"
-        else:
-            reason = "paired search did not improve and no certified bridge supports archival"
         return self._record(
             evidence,
             Decision.REJECT,
-            reason,
+            self._reject_reason(evidence),
             0.0,
+        )
+
+    def _reject_reason(self, evidence: EvidenceRecord) -> str:
+        if not evidence.contract_passed:
+            return "neither the unit contract nor paired search improved"
+        if not evidence.preservation_passed:
+            return (
+                "the candidate broke a preserved contract and paired search "
+                "did not improve"
+            )
+        return (
+            "the candidate broke an incumbent-passing regression and paired "
+            "search did not improve"
         )
 
     @staticmethod

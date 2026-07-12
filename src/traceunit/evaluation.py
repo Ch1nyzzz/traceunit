@@ -11,7 +11,6 @@ from traceunit.config import ProjectConfig
 from traceunit.decision import DecisionPolicy
 from traceunit.io import copy_source, read_json, write_json
 from traceunit.models import (
-    AttributionScope,
     BenchmarkEvaluation,
     BenchmarkPlan,
     CandidateProposal,
@@ -22,7 +21,6 @@ from traceunit.models import (
     RunState,
     TestPacket,
     TestTier,
-    UnitFamily,
 )
 from traceunit.paired import paired_task_differences
 from traceunit.replay import FrozenPacketRef, PacketReplayer, PacketReplayResult
@@ -66,7 +64,6 @@ class CandidateEvaluator:
         packet_path: Path,
         candidate_source: Path,
         diff_text: str,
-        packet_reused: bool,
     ) -> tuple[EvidenceRecord, DecisionRecord]:
         violations = mechanical_violations(
             benchmark=self.benchmark,
@@ -78,7 +75,6 @@ class CandidateEvaluator:
             "parent_id": state.incumbent_id,
             "parent_source": state.incumbent_source,
             "candidate_source": str(candidate_source.resolve()),
-            "packet_reused": packet_reused,
             "has_bridge": any(case.tier is TestTier.BRIDGE for case in packet.cases),
             "violations": violations,
             "costs": {
@@ -160,26 +156,6 @@ class CandidateEvaluator:
             candidate_source=candidate_source,
             output_dir=iteration_dir / "preservation_replay",
         )
-        latent = self._replay(
-            refs=(
-                FrozenPacketRef.from_dict(item) for item in state.latent_packet_refs
-            ),
-            candidate_source=candidate_source,
-            output_dir=iteration_dir / "latent_replay",
-        )
-        realized = tuple(
-            result.content_sha256 for result in latent if result.contract_passed
-        )
-        component_families = tuple(
-            sorted(
-                {
-                    UnitFamily(result.primary_family)
-                    for result in latent
-                    if result.contract_passed and result.primary_family
-                },
-                key=lambda item: item.value,
-            )
-        )
         unit_seconds = sum(
             result.duration_s for result in [*incumbent_results, *candidate_results]
         )
@@ -196,7 +172,6 @@ class CandidateEvaluator:
                 "bridge_contract_passed": bridge_contract_passed,
                 "bridge_contract_reasons": bridge_contract_reasons,
                 "preservation_replay": [item.to_dict() for item in preservation],
-                "latent_replay": [item.to_dict() for item in latent],
                 "incumbent_test_results": [
                     result.to_dict() for result in incumbent_results
                 ],
@@ -222,38 +197,9 @@ class CandidateEvaluator:
             bridge_contract_passed=bridge_contract_passed,
             primary_family=packet.primary_family,
             intervention_kind=proposal.intervention_kind,
-            attribution_scope=(
-                AttributionScope.COMPOSITION if realized else AttributionScope.ATOMIC
-            ),
-            component_families=component_families,
-            realized_latent=realized,
             preservation_passed=all(item.contract_passed for item in preservation),
             metadata=metadata,
         )
-        screening_after = self.config.decision.ut_screening_after
-        if (
-            screening_after > 0
-            and iteration > screening_after
-            and (
-                not contract_passed
-                or regression_loss > self.config.decision.max_regression_loss
-                or not evidence.preservation_passed
-            )
-        ):
-            metadata = dict(evidence.metadata)
-            metadata["ut_screening"] = True
-            evidence = replace(evidence, metadata=metadata)
-            return evidence, DecisionRecord(
-                iteration=iteration,
-                candidate_id=proposal.candidate_id,
-                decision=Decision.REJECT,
-                reason=(
-                    "UT screening: the frozen unit evidence already rejects this "
-                    "candidate, so the paired search evaluation was skipped"
-                ),
-                confidence=1.0,
-                evidence=evidence,
-            )
         candidate_eval = self.evaluate_pool(
             source=candidate_source,
             candidate_id=proposal.candidate_id,
@@ -276,23 +222,7 @@ class CandidateEvaluator:
             total_cost=candidate_eval.cost,
             metadata=metadata,
         )
-        decision = self.policy.decide(evidence)
-        if (
-            decision.decision is Decision.ARCHIVE
-            and not self.config.capabilities.partial_archive
-        ):
-            decision = DecisionRecord(
-                iteration=iteration,
-                candidate_id=proposal.candidate_id,
-                decision=Decision.PARTIAL_ELIGIBLE,
-                reason=(
-                    "the edit is partial-archive eligible, but component persistence "
-                    "is disabled for this condition"
-                ),
-                confidence=decision.confidence,
-                evidence=evidence,
-            )
-        return evidence, decision
+        return evidence, self.policy.decide(evidence)
 
     def evaluate_pool(
         self,

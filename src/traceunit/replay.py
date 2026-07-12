@@ -2,11 +2,8 @@
 
 A frozen TestPacket is the unit of certified behavior. Replay runs a stored
 packet against a candidate source and checks the packet's declared candidate
-contract. The same machinery serves two packet sets:
-
-* ``preserved`` packets (from promoted candidates) gate every later candidate;
-* ``latent`` packets (from archived candidates) are observational: a candidate
-  that satisfies one has realized that capability.
+contract. Only ``preserved`` packets (from promoted candidates) are replayed;
+they gate every later candidate.
 
 Integrity failures (missing or modified packet bundles) raise ``ReplayError``
 because they indicate a corrupted store, not a property of the candidate.
