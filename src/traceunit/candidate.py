@@ -23,6 +23,8 @@ from traceunit.models import (
     TestTier,
 )
 from traceunit.store import RunStore
+from traceunit.trace_evidence import stage_search_trace_evidence
+from traceunit.ut_memory import WorldModel
 
 
 class CandidateBuildError(RuntimeError):
@@ -45,11 +47,13 @@ class CandidateBuilder:
         store: RunStore,
         benchmark: BenchmarkAdapter,
         search_agent: WorkspaceAgent,
+        world_model: WorldModel | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.benchmark = benchmark
         self.search_agent = search_agent
+        self.world_model = world_model
         self.unit_runner = UnitEvidenceRunner(
             config=config, store=store, benchmark=benchmark
         )
@@ -74,6 +78,7 @@ class CandidateBuilder:
 
         if not source.is_dir():
             copy_source(Path(state.incumbent_source), source)
+        trace_manifest = candidate_dir / "trace_evidence" / "manifest.json"
         if not public_path.is_file():
             write_json(public_path, public_packet(packet))
             for case in packet.cases:
@@ -82,11 +87,20 @@ class CandidateBuilder:
                 target = candidate_dir / case.path
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(packet_path / case.path, target)
+            stage_search_trace_evidence(
+                store=self.store,
+                candidate_id=state.incumbent_id,
+                destination=trace_manifest.parent,
+                max_failure_traces=self.config.loop.max_failure_traces,
+            )
             write_json(history_path, self.public_history())
             archives = self.public_archives(state, candidate_dir)
             if archives:
                 write_json(candidate_dir / "archives.json", {"archives": archives})
+            if self.world_model is not None:
+                self.world_model.stage_into(candidate_dir)
         archives_path = candidate_dir / "archives.json"
+        world_model_path = candidate_dir / "ut_design_world_model.md"
 
         attempts = 0
         if inner_state_path.is_file():
@@ -115,9 +129,16 @@ class CandidateBuilder:
                         parent_id=state.incumbent_id,
                         source_dir=source,
                         public_packet_path=public_path,
+                        trace_manifest=trace_manifest,
+                        incumbent_search_score=state.incumbent_search_score,
                         history_path=history_path,
                         archives_path=(
                             archives_path if archives_path.is_file() else None
+                        ),
+                        world_model_path=(
+                            world_model_path
+                            if world_model_path.is_file()
+                            else None
                         ),
                         proposal_path=proposal_path,
                         target_api_env=self.config.benchmark.api_key_env,

@@ -258,9 +258,12 @@ def candidate_edit_prompt(
     parent_id: str,
     source_dir: Path,
     public_packet_path: Path,
+    proposal_path: Path,
+    trace_manifest: Path | None = None,
+    incumbent_search_score: float | None = None,
     history_path: Path | None = None,
     archives_path: Path | None = None,
-    proposal_path: Path,
+    world_model_path: Path | None = None,
     target_api_env: str | None = None,
 ) -> str:
     proposal = {
@@ -273,34 +276,57 @@ def candidate_edit_prompt(
         "regression_risks": ["behavior that could regress"],
         "metadata": {"notes": ""},
     }
-    history_input = (
-        f"Prior decisions and search deltas: {history_path}"
-        if history_path is not None
-        else ""
-    )
-    archives_guidance = (
-        f"Archived earlier candidates: {archives_path}\n"
-        "Each archive record is an earlier edit worth reading: either its unit "
-        "contract passed while paired search stayed flat, or its paired search "
-        "improved while its unit contract failed. Read the records and rebuild "
-        "whatever you judge valuable; never apply a diff blindly."
-        if archives_path is not None
-        else ""
-    )
-    return f"""You are the Candidate Editor.
+    input_lines = [
+        f"- editable source (a copy of the incumbent): {source_dir}",
+        f"- public frozen TestPacket: {public_packet_path}",
+    ]
+    if trace_manifest is not None:
+        input_lines.append(
+            f"- failing search traces of the incumbent: {trace_manifest} "
+            "(failing traces worst-first and passing traces best-first, flagged "
+            "by \"passed\"; read the failures the packet diagnoses in depth)"
+        )
+    if incumbent_search_score is not None:
+        input_lines.append(
+            f"- current aggregate search score: {incumbent_search_score}"
+        )
+    if history_path is not None:
+        input_lines.append(
+            f"- prior decisions and search deltas: {history_path}"
+        )
+    if archives_path is not None:
+        input_lines.append(
+            f"- archived earlier candidates: {archives_path} (each record is an "
+            "earlier edit worth reading: its unit contract passed while paired "
+            "search stayed flat, or its paired search improved while its unit "
+            "contract failed; rebuild what you judge valuable, never apply a "
+            "diff blindly)"
+        )
+    if world_model_path is not None:
+        input_lines.append(
+            f"- UT-design world model (read-only context): {world_model_path}"
+        )
+    inputs = "\n".join(input_lines)
+    return f"""You are the Candidate Editor in a trace-conditioned optimization protocol.
 
 Benchmark contract:
 {benchmark_context}
 
-Editable source: {source_dir}
-Public frozen TestPacket: {public_packet_path}
-{history_input}
-{archives_guidance}
+Inputs:
+{inputs}
 
-Implement one general mechanism-level edit that repairs the frozen public contract.
-Generalize beyond the visible reproducer. Do not inspect hidden tests, search-pool tasks,
-final tasks, evaluators, gold data, or task ids. Run the public test and a syntax/import
-smoke check before finishing; do not submit an edit whose public test still fails.
+Diagnose the failing traces and implement one general mechanism-level edit that repairs
+the failure the frozen TestPacket pins down. The packet is your cheap alignment check:
+after you finish, the harness runs the full frozen unit suite (plus every previously
+promoted contract) and, on failure, hands the concrete results back to you for another
+attempt - all before the expensive search evaluation. Promotion is decided by paired
+search on real tasks, so repair the mechanism; an edit that merely satisfies the tests
+without changing real behavior earns nothing.
+
+Generalize beyond the visible reproducer. Do not access hidden test files, benchmark
+evaluators, gold data, held-out pools, or final tasks. Run the public test and a
+syntax/import smoke check before finishing; do not submit an edit whose public test
+still fails.
 {_live_model_block(target_api_env)}
 
 Write {proposal_path}:

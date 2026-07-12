@@ -192,6 +192,11 @@ class OptimizationLoop:
             store=self.store,
             benchmark=self.benchmark,
             search_agent=self.search_agent,
+            world_model=(
+                self.world_model
+                if self.config.capabilities.online_ut_memory
+                else None
+            ),
         )
         self.evaluator = CandidateEvaluator(
             config=self.config,

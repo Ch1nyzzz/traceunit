@@ -804,3 +804,23 @@ def test_exhausted_inner_loop_still_reaches_search(tmp_path: Path) -> None:
     assert decision["decision"] == "reject"
     assert decision["evidence"]["metadata"]["unit_attempts"] == 2
     assert decision["evidence"]["search_delta"] is not None
+
+
+def test_proposer_sees_traces_score_and_world_model(tmp_path: Path) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    editor = SearchAgent()
+    OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        agents={"test_author": TestAuthor(), "search": editor},
+    ).run()
+
+    prompt = editor.prompts[0]
+    assert "failing search traces of the incumbent" in prompt
+    assert "current aggregate search score" in prompt
+    assert "UT-design world model" in prompt
+    candidate = config.loop.run_dir / "candidates/iter001_candidate"
+    assert (candidate / "trace_evidence/manifest.json").is_file()
+    assert (candidate / "ut_design_world_model.md").is_file()
+    staged = read_json(candidate / "trace_evidence/manifest.json")
+    assert staged["traces"], "the incumbent's failing traces are staged"
