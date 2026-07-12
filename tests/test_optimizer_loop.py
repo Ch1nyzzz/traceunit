@@ -728,3 +728,94 @@ def test_raw_traceunit_records_archive_ids_without_persisting_records(
     candidate = config.loop.run_dir / "candidates/iter001_candidate"
     assert not (candidate / "archives.json").exists()
     assert not (candidate / "ut_design_world_model.md").exists()
+
+
+class LearningEditor:
+    """Fails the contract on attempt 1, then fixes it after reading feedback."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.saw_feedback = False
+
+    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
+        assert role == "candidate_editor"
+        self.attempts += 1
+        if self.attempts == 1:
+            (workspace / "source/behavior.txt").write_text(
+                "still-bad", encoding="utf-8"
+            )
+        else:
+            assert "continuing your own previous attempt" in prompt
+            feedback = read_json(workspace / "unit_feedback.json")
+            self.saw_feedback = bool(feedback["failed_cases"])
+            assert feedback["contract_passed"] is False
+            public = [
+                case
+                for case in feedback["failed_cases"]
+                if case["tier"] == "public"
+            ]
+            assert public and "stderr_tail" in public[0]
+            hidden = [
+                case
+                for case in feedback["failed_cases"]
+                if case["tier"] != "public"
+            ]
+            assert all("stdout_tail" not in case for case in hidden)
+            (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
+        write_json(
+            workspace / "proposal.json",
+            {
+                "candidate_id": workspace.name,
+                "parent_id": "baseline",
+                "hypothesis_id": "h1",
+                "intervention_kind": "local_repair",
+                "mechanism_claim": "change behavior from bad to good",
+                "predicted_effect": "unit and search score improve",
+                "regression_risks": [],
+            },
+        )
+        return _agent_result(role, log_dir)
+
+
+def test_inner_unit_loop_feeds_failures_back_before_search(tmp_path: Path) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    benchmark = FakeBenchmark(tmp_path, natural_gain=True)
+    editor = LearningEditor()
+    summary = OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": editor},
+    ).run()
+
+    assert summary["incumbent_id"] == "iter001_candidate"
+    assert editor.attempts == 2
+    assert editor.saw_feedback
+    # The search pool was evaluated once for the baseline and once for the
+    # final candidate; the failed inner attempt never reached search.
+    assert benchmark.calls == ["search", "search"]
+    evidence = read_json(config.loop.run_dir / "iterations/iter_001/evidence.json")
+    assert evidence["metadata"]["unit_attempts"] == 2
+    assert evidence["contract_passed"] is True
+
+
+def test_exhausted_inner_loop_still_reaches_search(tmp_path: Path) -> None:
+    from dataclasses import replace as dc_replace
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    config = dc_replace(
+        config, loop=dc_replace(config.loop, max_inner_retries=1)
+    )
+    benchmark = FakeBenchmark(tmp_path, natural_gain=False)
+    OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": BadEditor()},
+    ).run()
+
+    # Retries exhausted (initial + 1 retry) and the paired search evaluation
+    # still ran: every mechanically valid candidate earns search evidence.
+    assert benchmark.calls == ["search", "search"]
+    decision = read_json(config.loop.run_dir / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "reject"
+    assert decision["evidence"]["metadata"]["unit_attempts"] == 2
+    assert decision["evidence"]["search_delta"] is not None

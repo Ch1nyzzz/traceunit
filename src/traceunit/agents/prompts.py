@@ -293,6 +293,37 @@ capability_augmentation, or orchestration_change, never free text.
 """
 
 
+def candidate_retry_prompt(
+    *,
+    attempt: int,
+    max_attempts: int,
+    source_dir: Path,
+    public_packet_path: Path,
+    feedback_path: Path,
+    proposal_path: Path,
+) -> str:
+    return f"""You are the Candidate Editor, continuing your own previous attempt.
+
+Your last edit did not satisfy the frozen unit tests. This is attempt {attempt} of
+{max_attempts} in the cheap unit loop; the expensive search evaluation only runs after
+this loop, so use it.
+
+Concrete failures: {feedback_path}
+Editable source (already contains your previous edit): {source_dir}
+Public frozen TestPacket: {public_packet_path}
+
+Read the feedback first. Public cases include their captured output; hidden cases show
+only their declared behavior description and pass/fail state. A failed preserved
+contract means your edit broke behavior an earlier promoted candidate certified -
+integrate with it instead of fighting it. Refine your edit, or revert and take a
+different approach to the same mechanism; do not weaken or game the tests. Run the
+public test and a syntax/import smoke check before finishing.
+
+Update {proposal_path} if your mechanism changed; keep candidate_id, parent_id,
+hypothesis_id, and intervention_kind unchanged.
+"""
+
+
 def regression_author_prompt(
     *,
     benchmark_context: str,

@@ -289,7 +289,7 @@ class OptimizationLoop:
                 self.packet_author.latest_reflection(iteration_dir),
                 source="test_author",
             )
-        proposal, candidate_source, diff_text = self.candidate_builder.build(
+        proposal, candidate_source, diff_text, unit = self.candidate_builder.build(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
@@ -307,6 +307,7 @@ class OptimizationLoop:
             packet_path=packet_path,
             candidate_source=candidate_source,
             diff_text=diff_text,
+            unit=unit,
         )
         decision = replace(decision, evidence=evidence)
         write_json(iteration_dir / "evidence.json", evidence.to_dict())

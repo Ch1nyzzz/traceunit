@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -19,6 +19,7 @@ from traceunit.models import (
     EvidenceRecord,
     PoolSliceRef,
     RunState,
+    TestExecution,
     TestPacket,
     TestTier,
 )
@@ -33,6 +34,135 @@ from traceunit.tests_runtime import (
     paired_test_metrics,
     run_test_cases,
 )
+
+
+@dataclass(frozen=True)
+class UnitEvidence:
+    """One complete unit verdict for a candidate source against a frozen packet.
+
+    Produced by ``UnitEvidenceRunner`` both inside the proposer's inner retry
+    loop (as concrete feedback) and as the authoritative unit half of the
+    final decision evidence.
+    """
+
+    violations: tuple[str, ...]
+    metrics: dict[str, float] = field(default_factory=dict)
+    contract_passed: bool = False
+    contract_reasons: tuple[str, ...] = ()
+    bridge_contract_passed: bool = False
+    bridge_contract_reasons: tuple[str, ...] = ()
+    has_bridge: bool = False
+    preservation: tuple[PacketReplayResult, ...] = ()
+    incumbent_results: tuple[TestExecution, ...] = ()
+    candidate_results: tuple[TestExecution, ...] = ()
+    attempts: int = 1
+    unit_seconds: float = 0.0
+    probe_calls: int = 0
+    probe_tokens: int = 0
+
+    @property
+    def preservation_passed(self) -> bool:
+        return all(item.contract_passed for item in self.preservation)
+
+    def unit_ok(self, max_regression_loss: float) -> bool:
+        return (
+            not self.violations
+            and self.contract_passed
+            and self.preservation_passed
+            and self.metrics.get("regression_loss", 0.0) <= max_regression_loss
+        )
+
+
+class UnitEvidenceRunner:
+    """Run the frozen packet plus all preserved contracts against one source."""
+
+    def __init__(
+        self,
+        *,
+        config: ProjectConfig,
+        store: RunStore,
+        benchmark: BenchmarkAdapter,
+    ) -> None:
+        self.config = config
+        self.store = store
+        self.benchmark = benchmark
+
+    def run(
+        self,
+        *,
+        packet: TestPacket,
+        packet_path: Path,
+        incumbent_source: Path,
+        candidate_source: Path,
+        preserved_refs: Iterable[dict[str, str]],
+        diff_text: str,
+        output_dir: Path,
+        incumbent_results: tuple[TestExecution, ...] | None = None,
+    ) -> UnitEvidence:
+        violations = mechanical_violations(
+            benchmark=self.benchmark,
+            candidate_source=candidate_source,
+            diff_text=diff_text,
+            out_dir=output_dir / "smoke",
+        )
+        if violations:
+            return UnitEvidence(violations=tuple(violations))
+        if incumbent_results is None:
+            incumbent_results = run_test_cases(
+                packet=packet,
+                bundle=packet_path,
+                source=incumbent_source,
+                subject="incumbent",
+                output_dir=output_dir / "incumbent",
+                python=self.config.benchmark.unit_python,
+                probe_runner=self.benchmark.run_agent_probe,
+            )
+        candidate_results = run_test_cases(
+            packet=packet,
+            bundle=packet_path,
+            source=candidate_source,
+            subject="candidate",
+            output_dir=output_dir / "candidate",
+            python=self.config.benchmark.unit_python,
+            probe_runner=self.benchmark.run_agent_probe,
+        )
+        metrics = paired_test_metrics(packet, incumbent_results, candidate_results)
+        contract_passed, contract_reasons = candidate_contract(
+            packet, candidate_results
+        )
+        has_bridge = any(case.tier is TestTier.BRIDGE for case in packet.cases)
+        bridge_contract_passed, bridge_contract_reasons = candidate_contract(
+            packet,
+            candidate_results,
+            tiers=frozenset({TestTier.BRIDGE}),
+        )
+        if not has_bridge:
+            bridge_contract_passed = False
+        preservation = PacketReplayer(
+            packet_root=self.store.packet_store_root,
+            python=self.config.benchmark.unit_python,
+            probe_runner=self.benchmark.run_agent_probe,
+        ).replay(
+            refs=(FrozenPacketRef.from_dict(item) for item in preserved_refs),
+            candidate_source=candidate_source,
+            output_dir=output_dir / "preservation",
+        )
+        executions = [*incumbent_results, *candidate_results]
+        return UnitEvidence(
+            violations=(),
+            metrics=metrics,
+            contract_passed=contract_passed,
+            contract_reasons=tuple(contract_reasons),
+            bridge_contract_passed=bridge_contract_passed,
+            bridge_contract_reasons=tuple(bridge_contract_reasons),
+            has_bridge=has_bridge,
+            preservation=preservation,
+            incumbent_results=tuple(incumbent_results),
+            candidate_results=tuple(candidate_results),
+            unit_seconds=sum(item.duration_s for item in executions),
+            probe_calls=sum(item.model_calls for item in executions),
+            probe_tokens=sum(item.tokens for item in executions),
+        )
 
 
 class CandidateEvaluator:
@@ -64,26 +194,22 @@ class CandidateEvaluator:
         packet_path: Path,
         candidate_source: Path,
         diff_text: str,
+        unit: UnitEvidence,
     ) -> tuple[EvidenceRecord, DecisionRecord]:
-        violations = mechanical_violations(
-            benchmark=self.benchmark,
-            candidate_source=candidate_source,
-            diff_text=diff_text,
-            out_dir=iteration_dir / "smoke",
-        )
         metadata = {
             "parent_id": state.incumbent_id,
             "parent_source": state.incumbent_source,
             "candidate_source": str(candidate_source.resolve()),
-            "has_bridge": any(case.tier is TestTier.BRIDGE for case in packet.cases),
-            "violations": violations,
+            "has_bridge": unit.has_bridge,
+            "violations": list(unit.violations),
+            "unit_attempts": unit.attempts,
             "costs": {
-                "unit_test_wall_seconds": 0.0,
-                "model_probe_calls": 0,
-                "model_probe_tokens": 0,
+                "unit_test_wall_seconds": unit.unit_seconds,
+                "model_probe_calls": unit.probe_calls,
+                "model_probe_tokens": unit.probe_tokens,
             },
         }
-        if violations:
+        if unit.violations:
             evidence = EvidenceRecord(
                 iteration=iteration,
                 candidate_id=proposal.candidate_id,
@@ -103,44 +229,13 @@ class CandidateEvaluator:
                 iteration=iteration,
                 candidate_id=proposal.candidate_id,
                 decision=Decision.REJECT,
-                reason="; ".join(violations),
+                reason="; ".join(unit.violations),
                 confidence=1.0,
                 evidence=evidence,
             )
 
-        pair_dir = iteration_dir / "paired_tests"
-        incumbent_results = run_test_cases(
-            packet=packet,
-            bundle=packet_path,
-            source=Path(state.incumbent_source),
-            subject="incumbent",
-            output_dir=pair_dir / "incumbent",
-            python=self.config.benchmark.unit_python,
-            probe_runner=self.benchmark.run_agent_probe,
-        )
-        candidate_results = run_test_cases(
-            packet=packet,
-            bundle=packet_path,
-            source=candidate_source,
-            subject="candidate",
-            output_dir=pair_dir / "candidate",
-            python=self.config.benchmark.unit_python,
-            probe_runner=self.benchmark.run_agent_probe,
-        )
-        metrics = paired_test_metrics(packet, incumbent_results, candidate_results)
-        contract_passed, contract_reasons = candidate_contract(
-            packet, candidate_results
-        )
-        has_bridge = bool(metadata["has_bridge"])
-        bridge_contract_passed, bridge_contract_reasons = candidate_contract(
-            packet,
-            candidate_results,
-            tiers=frozenset({TestTier.BRIDGE}),
-        )
-        if not has_bridge:
-            bridge_contract_passed = False
         regression_loss = max(
-            metrics["regression_loss"],
+            unit.metrics["regression_loss"],
             self._regression_loss(
                 iteration_dir=iteration_dir,
                 state=state,
@@ -149,55 +244,36 @@ class CandidateEvaluator:
                 diff_text=diff_text,
             ),
         )
-        preservation = self._replay(
-            refs=(
-                FrozenPacketRef.from_dict(item) for item in state.preserved_packet_refs
-            ),
-            candidate_source=candidate_source,
-            output_dir=iteration_dir / "preservation_replay",
-        )
-        unit_seconds = sum(
-            result.duration_s for result in [*incumbent_results, *candidate_results]
-        )
-        probe_calls = sum(
-            result.model_calls for result in [*incumbent_results, *candidate_results]
-        )
-        probe_tokens = sum(
-            result.tokens for result in [*incumbent_results, *candidate_results]
-        )
         metadata.update(
             {
-                "candidate_contract_passed": contract_passed,
-                "candidate_contract_reasons": contract_reasons,
-                "bridge_contract_passed": bridge_contract_passed,
-                "bridge_contract_reasons": bridge_contract_reasons,
-                "preservation_replay": [item.to_dict() for item in preservation],
+                "candidate_contract_passed": unit.contract_passed,
+                "candidate_contract_reasons": list(unit.contract_reasons),
+                "bridge_contract_passed": unit.bridge_contract_passed,
+                "bridge_contract_reasons": list(unit.bridge_contract_reasons),
+                "preservation_replay": [
+                    item.to_dict() for item in unit.preservation
+                ],
                 "incumbent_test_results": [
-                    result.to_dict() for result in incumbent_results
+                    result.to_dict() for result in unit.incumbent_results
                 ],
                 "candidate_test_results": [
-                    result.to_dict() for result in candidate_results
+                    result.to_dict() for result in unit.candidate_results
                 ],
-                "costs": {
-                    "unit_test_wall_seconds": unit_seconds,
-                    "model_probe_calls": probe_calls,
-                    "model_probe_tokens": probe_tokens,
-                },
             }
         )
         evidence = EvidenceRecord(
             iteration=iteration,
             candidate_id=proposal.candidate_id,
             packet_id=packet.packet_id,
-            public_gain=metrics["public_gain"],
-            hidden_gain=metrics["hidden_gain"],
-            bridge_gain=metrics["bridge_gain"],
+            public_gain=unit.metrics["public_gain"],
+            hidden_gain=unit.metrics["hidden_gain"],
+            bridge_gain=unit.metrics["bridge_gain"],
             regression_loss=regression_loss,
-            contract_passed=contract_passed,
-            bridge_contract_passed=bridge_contract_passed,
+            contract_passed=unit.contract_passed,
+            bridge_contract_passed=unit.bridge_contract_passed,
             primary_family=packet.primary_family,
             intervention_kind=proposal.intervention_kind,
-            preservation_passed=all(item.contract_passed for item in preservation),
+            preservation_passed=unit.preservation_passed,
             metadata=metadata,
         )
         candidate_eval = self.evaluate_pool(
@@ -246,23 +322,6 @@ class CandidateEvaluator:
         path = self.store.evaluation_dir(parent_id, self.plan.search.slice_id)
         parent = BenchmarkEvaluation.from_dict(read_json(path / "evaluation.json"))
         return paired_task_differences(parent, candidate)
-
-    def _replay(
-        self,
-        *,
-        refs: Iterable[FrozenPacketRef],
-        candidate_source: Path,
-        output_dir: Path,
-    ) -> tuple[PacketReplayResult, ...]:
-        return PacketReplayer(
-            packet_root=self.store.packet_store_root,
-            python=self.config.benchmark.unit_python,
-            probe_runner=self.benchmark.run_agent_probe,
-        ).replay(
-            refs=refs,
-            candidate_source=candidate_source,
-            output_dir=output_dir,
-        )
 
     def _regression_loss(
         self,
