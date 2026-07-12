@@ -25,7 +25,7 @@ from traceunit.ontology import freeze_ontology, ontology_ref
 from traceunit.packets import PacketAuthor, TestDesignFailure
 from traceunit.score_only import ScoreOnlyCandidateBuilder, ScoreOnlyEvaluator
 from traceunit.store import RunStore
-from traceunit.ut_memory import UTMemoryLedger, UTMemoryManager
+from traceunit.ut_memory import WorldModel
 from traceunit.trace_evidence import (
     NoFailureTraces,
     TraceEvidenceError,
@@ -81,13 +81,7 @@ class OptimizationLoop:
             else None
         )
         self.policy = DecisionPolicy(config.decision)
-        self.ut_memory_ledger = UTMemoryLedger(self.store.ut_feedback_episodes_path)
-        self.ut_memory = UTMemoryManager(
-            root=self.store.memory_root,
-            ledger=self.ut_memory_ledger,
-            max_lessons=config.memory.max_world_model_lessons,
-            world_model_path=self.store.ut_world_model_path,
-        )
+        self.world_model = WorldModel(self.store.ut_world_model_path)
         self.benchmark_plan: BenchmarkPlan | None = None
         self.packet_author: PacketAuthor | None = None
         self.candidate_builder: CandidateBuilder | None = None
@@ -123,7 +117,7 @@ class OptimizationLoop:
         state.status = "running"
         self.store.save_state(state)
         if self.config.capabilities.online_ut_memory:
-            self.ut_memory.ensure_world_model()
+            self.world_model.ensure()
 
         while state.next_iteration <= self.config.loop.iterations:
             iteration = state.next_iteration
@@ -155,9 +149,6 @@ class OptimizationLoop:
 
         if state.status == "running":
             state.status = "completed"
-        if self.config.capabilities.online_ut_memory:
-            # No further author run will consume the last staged digest.
-            self._commit_pending_reflection(None, source="run_end_fallback")
         self.store.save_state(state)
         summary = self._summary(state)
         write_json(self.store.root / "summary.json", summary)
@@ -190,6 +181,11 @@ class OptimizationLoop:
             store=self.store,
             benchmark=self.benchmark,
             agent=self.test_author_agent,
+            world_model=(
+                self.world_model
+                if self.config.capabilities.online_ut_memory
+                else None
+            ),
         )
         self.candidate_builder = CandidateBuilder(
             config=self.config,
@@ -262,33 +258,19 @@ class OptimizationLoop:
             return self._resume_completed_iteration(
                 state=state, iteration=iteration, iteration_dir=iteration_dir
             )
-        ut_memory = self._freeze_memory_input(iteration_dir)
         write_json(
             iteration_dir / "iteration_status.json",
             {
                 "iteration": iteration,
                 "status": "running",
                 "incumbent": state.incumbent_id,
-                "memory_version": self.ut_memory_ledger.version,
             },
-        )
-        pending_reflection = (
-            self.ut_memory.pending_reflection()
-            if self.config.capabilities.online_ut_memory
-            else None
         )
         packet, packet_path = self.packet_author.get_or_author(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
-            ut_memory_path=ut_memory,
-            pending_reflection=pending_reflection,
         )
-        if pending_reflection is not None:
-            self._commit_pending_reflection(
-                self.packet_author.latest_reflection(iteration_dir),
-                source="test_author",
-            )
         proposal, candidate_source, diff_text, unit = self.candidate_builder.build(
             state=state,
             iteration=iteration,
@@ -323,10 +305,9 @@ class OptimizationLoop:
             evidence=evidence,
             decision=decision,
         )
-        self._reflect_iteration(
+        self._record_last_iteration(
             iteration=iteration,
             proposal=proposal,
-            packet_path=packet_path,
             evidence=evidence,
             decision=decision,
         )
@@ -387,10 +368,9 @@ class OptimizationLoop:
             evidence=evidence,
             decision=decision,
         )
-        self._reflect_iteration(
+        self._record_last_iteration(
             iteration=iteration,
             proposal=proposal,
-            packet_path=packet_path,
             evidence=evidence,
             decision=decision,
         )
@@ -408,52 +388,51 @@ class OptimizationLoop:
             decision=decision,
         )
 
-    def _reflect_iteration(
+    def _record_last_iteration(
         self,
         *,
         iteration: int,
         proposal: CandidateProposal,
-        packet_path: Path,
         evidence: EvidenceRecord,
         decision: DecisionRecord,
     ) -> None:
-        """Stage this iteration's outcome for the next Test Author run."""
+        """Write the previous-iteration digest the next Test Author reads.
 
-        if not self.config.capabilities.online_ut_memory or evidence.metadata.get(
-            "violations"
-        ):
+        Nothing here is sanitized: the author gets the decision, the paired
+        per-task outcomes, and pointers to the mismatch record when the unit
+        verdict and search disagreed. What it learns from them is its own job,
+        written into the append-only world model.
+        """
+
+        if not self.config.capabilities.online_ut_memory:
             return
-        staged = self.ut_memory.stage_reflection(
-            iteration=iteration,
-            proposal=proposal,
-            packet_path=packet_path,
-            evidence=evidence,
-            decision=decision,
+        mismatch_dir = self.store.mismatch_root / f"iter_{iteration:03d}"
+        write_json(
+            self.store.memory_root / "last_iteration.json",
+            {
+                "iteration": iteration,
+                "candidate_id": proposal.candidate_id,
+                "decision": decision.decision.value,
+                "reason": decision.reason,
+                "mechanism_claim": proposal.mechanism_claim,
+                "packet_id": evidence.packet_id,
+                "search_delta": evidence.search_delta,
+                "contract_passed": evidence.contract_passed,
+                "preservation_passed": evidence.preservation_passed,
+                "unit_attempts": evidence.metadata.get("unit_attempts"),
+                "unit_failure_reasons": list(
+                    evidence.metadata.get("candidate_contract_reasons") or []
+                ),
+                "task_flips": self._task_flips(
+                    parent_id=str(evidence.metadata.get("parent_id") or ""),
+                    candidate_id=proposal.candidate_id,
+                ),
+                "mismatch": is_mismatch(evidence, self.config.decision),
+                "mismatch_path": (
+                    str(mismatch_dir) if mismatch_dir.is_dir() else None
+                ),
+            },
         )
-        if staged:
-            self.store.append_event(
-                "ut_reflection_staged",
-                iteration=iteration,
-                candidate_id=proposal.candidate_id,
-            )
-
-    def _commit_pending_reflection(
-        self,
-        reflection: Mapping[str, Any] | None,
-        *,
-        source: str,
-    ) -> None:
-        episode = self.ut_memory.commit_pending(reflection)
-        if episode is not None:
-            self.store.append_event(
-                "ut_memory_updated",
-                iteration=episode.iteration,
-                candidate_id=episode.candidate_id,
-                memory_version=self.ut_memory_ledger.version,
-                search_outcome=episode.search_outcome.value,
-                assessment=episode.assessment.value,
-                reflection_source=source if reflection else "fallback",
-            )
 
     def _finish_iteration(
         self,
@@ -689,6 +668,9 @@ class OptimizationLoop:
         diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
         if diff_path.is_file():
             shutil.copy2(diff_path, mismatch_dir / "candidate.diff")
+        packet_copy = mismatch_dir / "packet"
+        if packet_path.is_dir() and not packet_copy.exists():
+            shutil.copytree(packet_path, packet_copy)
         kind = (
             "search_improved_unit_failed"
             if not unit_ok(evidence, self.config.decision)
@@ -772,16 +754,6 @@ class OptimizationLoop:
             content_sha256=packet.content_sha256,
         )
 
-    def _freeze_memory_input(self, iteration_dir: Path) -> Path | None:
-        if not self.config.capabilities.online_ut_memory:
-            return None
-        if not self.store.ut_world_model_path.is_file():
-            self.ut_memory.ensure_world_model()
-        test_path = iteration_dir / "inputs" / "ut_design_world_model.md"
-        test_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.store.ut_world_model_path, test_path)
-        return test_path
-
     def _skip_failed_test_design(
         self, state: RunState, iteration: int, exc: Exception
     ) -> RunState:
@@ -851,8 +823,7 @@ class OptimizationLoop:
             "preserved_packets": list(state.preserved_packet_refs),
             "archived_ids": state.archived_ids,
             "archive_refs": list(state.archive_refs),
-            "ut_memory_version": self.ut_memory_ledger.version,
-            "ut_feedback_episodes": len(self.ut_memory_ledger.episodes),
+            "world_model_distills": self.world_model.distill_count,
             "total_cost": state.total_cost,
             "search_cost": state.search_cost,
             "unit_test_wall_seconds": self._unit_test_wall_seconds(),

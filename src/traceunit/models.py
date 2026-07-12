@@ -55,11 +55,6 @@ class TestExecutionMode(StrEnum):
     MODEL_BACKED_PROBE = "model_backed_probe"
 
 
-class AttributionScope(StrEnum):
-    ATOMIC = "atomic"
-    COMPOSITION = "composition"
-
-
 class TestStatus(StrEnum):
     PROPOSED = "proposed"
     ADMITTED = "admitted"
@@ -502,9 +497,6 @@ class EvidenceRecord:
     bridge_contract_passed: bool
     primary_family: UnitFamily | None = None
     intervention_kind: InterventionKind = InterventionKind.LOCAL_REPAIR
-    attribution_scope: AttributionScope = AttributionScope.ATOMIC
-    component_families: tuple[UnitFamily, ...] = ()
-    realized_latent: tuple[str, ...] = ()
     search_delta: float | None = None
     preservation_passed: bool = True
     total_cost: float = 0.0
@@ -516,8 +508,6 @@ class EvidenceRecord:
             self.primary_family.value if self.primary_family is not None else None
         )
         value["intervention_kind"] = self.intervention_kind.value
-        value["attribution_scope"] = self.attribution_scope.value
-        value["component_families"] = [item.value for item in self.component_families]
         return value
 
     @classmethod
@@ -539,15 +529,6 @@ class EvidenceRecord:
             ),
             intervention_kind=InterventionKind(
                 str(value.get("intervention_kind") or InterventionKind.LOCAL_REPAIR)
-            ),
-            attribution_scope=AttributionScope(
-                str(value.get("attribution_scope") or AttributionScope.ATOMIC)
-            ),
-            component_families=tuple(
-                UnitFamily(str(item)) for item in value.get("component_families") or []
-            ),
-            realized_latent=tuple(
-                str(item) for item in value.get("realized_latent") or []
             ),
             search_delta=(
                 None

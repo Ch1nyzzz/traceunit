@@ -27,10 +27,11 @@ def test_author_prompt(
     benchmark_context: str,
     trace_manifest: Path,
     incumbent_source: Path,
-    ut_memory_path: Path | None,
     output_dir: Path,
-    previous_outcome_path: Path | None = None,
-    reflection_output_path: Path | None = None,
+    iteration: int = 0,
+    world_model_path: Path | None = None,
+    last_iteration_path: Path | None = None,
+    mismatch_path: Path | None = None,
     probes_supported: bool = False,
     target_api_env: str | None = None,
 ) -> str:
@@ -122,18 +123,53 @@ def test_author_prompt(
         "content_sha256": "",
         "metadata": {},
     }
+    memory_lines = []
+    if world_model_path is not None:
+        memory_lines.append(f"- UT-design world model (append-only): {world_model_path}")
+    if last_iteration_path is not None:
+        memory_lines.append(
+            f"- previous iteration outcome (decision, per-task paired search flips, "
+            f"unit results): {last_iteration_path}"
+        )
+    if mismatch_path is not None:
+        memory_lines.append(
+            f"- unit/search MISMATCH evidence from the previous iteration: "
+            f"{mismatch_path} (mismatch.json, the candidate diff, the frozen packet "
+            f"under packet/, and the mismatch candidate's failed search traces under "
+            f"candidate_traces/)"
+        )
     memory_input = (
-        f"- online UT-design world model: {ut_memory_path}"
-        if ut_memory_path is not None
-        else "- online UT-design memory: disabled for this experiment condition"
+        "\n".join(memory_lines)
+        if memory_lines
+        else "- UT-design memory: disabled for this experiment condition"
     )
-    memory_guidance = (
-        "The world model contains sanitized lessons from earlier TestPackets. Use it only to "
-        "improve reproducer, hidden-sibling, intervention, bridge, and regression design. It "
-        "does not rank directions and must never override the current trace evidence."
-        if ut_memory_path is not None
-        else "No online UT-design memory is available in this condition."
-    )
+    if world_model_path is not None:
+        distill_step = (
+            f"FIRST, before designing anything: read the world model at "
+            f"{world_model_path}."
+        )
+        if last_iteration_path is not None:
+            distill_step += (
+                f" Then study the previous iteration's outcome and append a new "
+                f"`## iter_{iteration:03d} distill` section to that same file: what "
+                f"the unit tests predicted, what paired search actually did per task, "
+                f"why they agreed or disagreed, and what you will design differently "
+                f"now. Never rewrite or delete prior entries."
+            )
+        if mismatch_path is not None:
+            distill_step += (
+                " The previous iteration was a MISMATCH: the unit verdict and paired "
+                "search disagreed. Diagnose it properly before designing: read the "
+                "frozen tests, the candidate diff, and the failed search traces, and "
+                "name concretely what the tests measured that the search tasks do "
+                "not (or the reverse). Your new packet must not repeat that gap."
+            )
+        memory_guidance = distill_step + (
+            " Apply your own accumulated design rules; they never override the "
+            "current trace evidence."
+        )
+    else:
+        memory_guidance = "No UT-design memory is available in this condition."
     probe_guidance = (
         "For capability claims only a live model can witness, add a case with "
         "execution_mode='model_backed_probe', driver='agent_probe', strict "
@@ -151,36 +187,15 @@ def test_author_prompt(
         else "This benchmark does not support model-backed probes: every case must "
         "use execution_mode='deterministic'."
     )
-    reflection_block = ""
-    if previous_outcome_path is not None and reflection_output_path is not None:
-        reflection_example = {
-            "assessment": "likely_test_gap",
-            "suspected_gap": "the packet checked critic invocation but not critique adoption",
-            "recommendation": (
-                "For similar traces, test counterexample discovery, delivery to the solver, "
-                "and a resulting correction; vary the hidden edge case structurally."
-            ),
-            "alternative_explanation": "the candidate may have overfit the visible contract",
-            "confidence": "low",
-        }
-        reflection_block = f"""
-Before designing the new packet, close the loop on the previous iteration:
-- previous packet outcome digest: {previous_outcome_path}
-First write {reflection_output_path} as JSON:
-{json.dumps(reflection_example, indent=2, ensure_ascii=False)}
-assessment is exactly one of likely_test_gap, likely_edit_overfit, trajectory_interaction, or
-insufficient_evidence; confidence is low, medium, or high. A unit/search mismatch does not prove
-the tests were wrong, and composition outcomes have low attribution: derive interaction or bridge
-lessons and never rank L0 families. The recommendation must be a transferable test-design rule,
-not a task-, repository-, or benchmark-specific fact. Then apply your own lesson to the packet
-you design next.
-"""
     return f"""You are the Test Author in a trace-conditioned optimization protocol.
 
-Author a causal TestPacket before any candidate edit or composition plan exists. Diagnose at
-least two trace-supported hypotheses, choose one, and distinguish it from the alternatives.
-The tests measure agent policy behavior; they must not solve or grade benchmark tasks.
-{reflection_block}
+Author a causal TestPacket before any candidate edit exists. Diagnose at least two
+trace-supported hypotheses, choose one, and distinguish it from the alternatives. The tests
+are a cheap proxy for the search distribution: a later patch that satisfies them should be a
+patch that actually repairs the diagnosed failure on real tasks. They measure agent policy
+behavior; they must not solve or grade benchmark tasks.
+
+{memory_guidance}
 
 Choose family only from the frozen L0 registry:
 {prompt_definitions()}
@@ -200,7 +215,7 @@ Inputs:
 - incumbent source: {incumbent_source}
 {memory_input}
 
-{memory_guidance} Set packet.primary_family to the selected target hypothesis family. Keep the
+Set packet.primary_family to the selected target hypothesis family. Keep the
 specific mechanism in mechanism, claim, target_boundary, and the tests. Do not put family labels
 on individual cases.
 {_live_model_block(target_api_env)}
@@ -225,8 +240,11 @@ intervention, and an off-target regression. Add a downstream bridge whenever it 
 without a grader. {probe_guidance} Generated code must never call a model API or access
 credentials.
 Prefer mutation-based contracts that test counterexample discovery, critique adoption, and final
-correction rather than merely checking that a critic/debate component exists. Run every supported
-test against the incumbent before finishing. Do not edit the incumbent.
+correction rather than merely checking that a critic/debate component exists. Ground each test in
+real model behavior: prefer a model-backed probe or a replay of real trace structure over a
+scripted fake client that branches on keywords in the prompt - a keyword-matching stub certifies
+string content, not behavior, and its verdicts will not track the search distribution. Run every
+supported test against the incumbent before finishing. Do not edit the incumbent.
 
 Required JSON shape:
 {json.dumps(example, indent=2, ensure_ascii=False)}

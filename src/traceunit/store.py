@@ -16,7 +16,6 @@ class RunStore:
         self.benchmark_plan_path = self.root / "benchmark_data" / "plan.json"
         self.ontology_path = self.root / "protocol" / "l0_ontology.json"
         self.memory_root = self.root / "ut_memory"
-        self.ut_feedback_episodes_path = self.memory_root / "episodes.jsonl"
         self.ut_world_model_path = self.memory_root / "world_model.md"
         self.packet_store_root = self.root / "frozen_packets"
         self.archive_root = self.root / "archive"
@@ -41,7 +40,7 @@ class RunStore:
         if enabled.get("generated_packets", True):
             names.extend(["test_library", "frozen_packets"])
         if enabled.get("online_ut_memory", True):
-            names.extend(["ut_memory", "ut_memory/reflections"])
+            names.append("ut_memory")
         for name in names:
             (self.root / name).mkdir(exist_ok=True)
         config_path = self.root / "config.snapshot.json"

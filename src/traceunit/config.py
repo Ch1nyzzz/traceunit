@@ -105,13 +105,6 @@ class ProtocolConfig:
 
 
 @dataclass(frozen=True)
-class MemoryConfig:
-    """Bound the small, online UT-design memory exposed to later authors."""
-
-    max_world_model_lessons: int = 64
-
-
-@dataclass(frozen=True)
 class LoopConfig:
     run_dir: Path
     run_id: str = ""
@@ -134,7 +127,6 @@ class ProjectConfig:
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     decision: DecisionConfig = field(default_factory=DecisionConfig)
-    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     @property
     def capabilities(self) -> ConditionCapabilities:
@@ -214,7 +206,6 @@ def load_config(path: Path) -> ProjectConfig:
             "protocol",
             "agents",
             "decision",
-            "memory",
         },
         "root",
     )
@@ -336,7 +327,6 @@ def load_config(path: Path) -> ProjectConfig:
     decision_values = _section(
         dict(raw.get("decision") or {}), DecisionConfig, "decision"
     )
-    memory_values = _section(dict(raw.get("memory") or {}), MemoryConfig, "memory")
     protocol_values = _section(
         dict(raw.get("protocol") or {}), ProtocolConfig, "protocol"
     )
@@ -350,17 +340,13 @@ def load_config(path: Path) -> ProjectConfig:
         allowed = ", ".join(item.value for item in ExperimentCondition)
         raise ValueError(f"protocol.condition must be one of: {allowed}") from exc
     decision = DecisionConfig(**decision_values)
-    memory = MemoryConfig(**memory_values)
     for name, value in decision.__dict__.items():
         if float(value) < 0:
             raise ValueError(f"decision.{name} must be nonnegative")
-    if memory.max_world_model_lessons < 1:
-        raise ValueError("memory.max_world_model_lessons must be positive")
     return ProjectConfig(
         loop=loop,
         benchmark=benchmark,
         protocol=protocol,
         agents=agents,
         decision=decision,
-        memory=memory,
     )

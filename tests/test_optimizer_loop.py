@@ -9,7 +9,6 @@ from traceunit.benchmarks.pools import freeze_benchmark_plan, load_pool_items
 from traceunit.config import (
     AgentConfig,
     AgentsConfig,
-    MemoryConfig,
     BenchmarkConfig,
     LoopConfig,
     ExperimentCondition,
@@ -156,20 +155,21 @@ class TestAuthor:
 
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "test_author"
-        if "reflection.json" in prompt:
-            assert (workspace / "previous_outcome.json").is_file()
-            write_json(
-                workspace / "reflection.json",
-                {
-                    "assessment": "likely_test_gap",
-                    "suspected_gap": "the bridge did not exercise adoption",
-                    "recommendation": (
-                        "Fake author lesson: vary the hidden sibling structurally."
-                    ),
-                    "alternative_explanation": "the edit may have overfit",
-                    "confidence": "medium",
-                },
-            )
+        world_model = workspace / "ut_design_world_model.md"
+        if world_model.is_file() and "distill" in prompt:
+            marker = ""
+            if (workspace / "last_iteration.json").is_file():
+                info = read_json(workspace / "last_iteration.json")
+                marker = (
+                    f"\n## iter_{int(info['iteration']):03d} distill\n"
+                    f"- Fake author lesson: decision was {info['decision']} with "
+                    f"delta {info['search_delta']}.\n"
+                )
+            if marker:
+                world_model.write_text(
+                    world_model.read_text(encoding="utf-8") + marker,
+                    encoding="utf-8",
+                )
         output = workspace / "output"
         public = output / "tests/public/target.py"
         hidden = output / "tests/hidden/sibling.py"
@@ -360,7 +360,6 @@ def _config(
             regression_author=AgentConfig(enabled=False),
         ),
         protocol=ProtocolConfig(condition=condition),
-        memory=MemoryConfig(),
     )
 
 
@@ -576,7 +575,7 @@ def test_score_only_condition_has_no_unit_archive_or_memory_artifacts(
     }
 
 
-def test_full_condition_reflects_each_completed_search_comparison(
+def test_full_condition_records_last_iteration_for_the_next_author(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, ExperimentCondition.FULL)
@@ -587,14 +586,18 @@ def test_full_condition_reflects_each_completed_search_comparison(
     ).run()
 
     store = RunStore(config.loop.run_dir)
-    assert summary["ut_memory_version"] == 1
-    assert summary["ut_feedback_episodes"] == 1
-    assert store.ut_feedback_episodes_path.is_file()
     assert store.ut_world_model_path.is_file()
     content = store.ut_world_model_path.read_text(encoding="utf-8")
-    assert content.startswith("# TraceUnit UT-design world model\n")
-    assert content.count("\n") >= 4
-    assert "\\n" not in content
+    assert content.startswith("# UT design world model\n")
+    assert "Append-only" in content
+    # A single iteration leaves no distill (the author had nothing to close
+    # the loop on), but the digest for the next author exists and is raw.
+    assert summary["world_model_distills"] == 0
+    digest = read_json(store.memory_root / "last_iteration.json")
+    assert digest["decision"] == "promote"
+    assert digest["search_delta"] > 0
+    assert digest["task_flips"] and digest["task_flips"][0]["flipped"] is True
+    assert digest["mismatch"] is False
     assert not (config.loop.run_dir / "calibration").exists()
 
 
@@ -608,77 +611,59 @@ class FlipBenchmark(FakeBenchmark):
         )
 
 
-def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
+def test_author_distill_is_committed_back_to_the_world_model(
+    tmp_path: Path,
+) -> None:
     config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
     summary = OptimizationLoop(
         config,
-        # iter1 archives (flat search), iter2 promotes: both iterations author a
-        # fresh packet, so iter2's author consumes iter1's staged digest.
+        # iter1 archives (flat search), iter2 promotes: iter2's author reads
+        # iter1's digest and appends its distill to the world model.
         benchmark=FlipBenchmark(tmp_path, natural_gain=False),
         agents={"test_author": TestAuthor(), "search": SearchAgent()},
     ).run()
 
     store = RunStore(config.loop.run_dir)
-    episodes = {
-        item["iteration"]: item
-        for item in (
-            json.loads(line)
-            for line in store.ut_feedback_episodes_path.read_text(
-                encoding="utf-8"
-            ).splitlines()
+    content = store.ut_world_model_path.read_text(encoding="utf-8")
+    assert "## iter_001 distill" in content
+    assert "Fake author lesson: decision was archive" in content
+    assert summary["world_model_distills"] == 1
+    events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert '"world_model_updated"' in events
+
+
+class SilentAuthor(TestAuthor):
+    """Authors valid packets but never writes its distill."""
+
+    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
+        world_model = workspace / "ut_design_world_model.md"
+        result = super().run(
+            role=role, prompt=prompt, workspace=workspace, log_dir=log_dir
         )
-    }
-    assert summary["ut_feedback_episodes"] == 2
-    # Iteration 1's lesson was written by the next iteration's Test Author.
-    assert episodes[1]["recommendation"].startswith("Fake author lesson")
-    assert episodes[1]["confidence"] == "medium"
-    # The final iteration has no later author run; the run-end fallback covers it.
-    assert not episodes[2]["recommendation"].startswith("Fake author lesson")
-    assert "Fake author lesson" in store.ut_world_model_path.read_text(
+        if world_model.is_file():
+            # Undo whatever the base fake appended: this author stays silent.
+            text = world_model.read_text(encoding="utf-8")
+            head = text.split("\n## iter_")[0]
+            world_model.write_text(head, encoding="utf-8")
+        return result
+
+
+def test_skipped_distill_is_recorded_not_papered_over(tmp_path: Path) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
+    summary = OptimizationLoop(
+        config,
+        benchmark=FlipBenchmark(tmp_path, natural_gain=False),
+        agents={"test_author": SilentAuthor(), "search": SearchAgent()},
+    ).run()
+
+    assert summary["world_model_distills"] == 0
+    events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert '"world_model_not_updated"' in events
+    content = RunStore(config.loop.run_dir).ut_world_model_path.read_text(
         encoding="utf-8"
     )
-    assert not (store.memory_root / "pending_reflection.json").exists()
-
-
-def test_commit_pending_tolerates_malformed_reflection(tmp_path: Path) -> None:
-    from traceunit.ut_memory import UTMemoryLedger, UTMemoryManager
-
-    root = tmp_path / "memory"
-    root.mkdir()
-    manager = UTMemoryManager(
-        root=root,
-        ledger=UTMemoryLedger(root / "episodes.jsonl"),
-        max_lessons=8,
-        world_model_path=root / "world_model.md",
-    )
-    write_json(
-        root / "pending_reflection.json",
-        {
-            "candidate_id": "iter001_candidate",
-            "iteration": 1,
-            "primary_family": "verification",
-            "intervention_kind": "local_repair",
-            "attribution_scope": "atomic",
-            "component_families": [],
-            "local_contract_passed": True,
-            "bridge_contract_passed": True,
-            "search_outcome": "improved",
-            "committed_decision": "promote",
-        },
-    )
-    episode = manager.commit_pending(
-        {
-            "assessment": "made_up_value",
-            "recommendation": "still recorded",
-            "confidence": "certain",
-        }
-    )
-    assert episode is not None
-    assert episode.assessment.value == "insufficient_evidence"
-    assert episode.confidence == "low"
-    assert episode.recommendation == "still recorded"
-    assert not (root / "pending_reflection.json").exists()
-    assert manager.commit_pending(None) is None
+    # No fallback template text was injected on the author's behalf.
+    assert "## iter_0" not in content
 
 
 def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> None:

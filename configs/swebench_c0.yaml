@@ -43,6 +43,3 @@ decision:
   # archive band tolerates it; archival is observational and never moves the
   # incumbent.
   noninferiority_margin: 0.04
-
-memory:
-  max_world_model_lessons: 64

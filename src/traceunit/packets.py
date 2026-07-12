@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any, Mapping
 
 from traceunit.agents.prompts import test_author_prompt
 from traceunit.agents.runner import WorkspaceAgent
@@ -15,7 +14,10 @@ from traceunit.models import (
     TestPacket,
 )
 from traceunit.store import RunStore
-from traceunit.trace_evidence import stage_search_trace_evidence
+from traceunit.trace_evidence import (
+    TraceEvidenceError,
+    stage_search_trace_evidence,
+)
 from traceunit.tests_runtime import (
     InvalidTestPacket,
     admission_contract,
@@ -24,6 +26,7 @@ from traceunit.tests_runtime import (
     run_test_cases,
     verify_frozen_packet,
 )
+from traceunit.ut_memory import WorldModel
 
 
 class TestDesignFailure(RuntimeError):
@@ -38,11 +41,13 @@ class PacketAuthor:
         store: RunStore,
         benchmark: BenchmarkAdapter,
         agent: WorkspaceAgent,
+        world_model: WorldModel | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.benchmark = benchmark
         self.agent = agent
+        self.world_model = world_model
 
     def get_or_author(
         self,
@@ -50,8 +55,6 @@ class PacketAuthor:
         state: RunState,
         iteration: int,
         iteration_dir: Path,
-        ut_memory_path: Path | None,
-        pending_reflection: Path | None = None,
     ) -> tuple[TestPacket, Path]:
         """Author one fresh packet per iteration; packet_ref.json is resume-only."""
 
@@ -65,8 +68,6 @@ class PacketAuthor:
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
-            ut_memory_path=ut_memory_path,
-            pending_reflection=pending_reflection,
         )
         write_json(packet_ref, {"path": str(path), "packet_id": packet.packet_id})
         return packet, path
@@ -77,21 +78,63 @@ class PacketAuthor:
             raise TestDesignFailure(f"frozen TestPacket hash mismatch: {path}")
         return packet
 
-    @staticmethod
-    def latest_reflection(iteration_dir: Path) -> Mapping[str, Any] | None:
-        """Return the newest attempt's reflection.json, if the author wrote one."""
+    def _stage_memory_inputs(self, workspace: Path) -> dict[str, Path | None]:
+        """Stage the world model, the previous-iteration digest, and any
+        mismatch evidence (record, diff, and the mismatch candidate's failed
+        search traces) into the author's workspace."""
 
-        paths = sorted(
-            (iteration_dir / "test_author").glob("attempt_*/workspace/reflection.json")
-        )
-        for path in reversed(paths):
-            try:
-                value = read_json(path)
-            except (OSError, ValueError):
-                continue
-            if isinstance(value, Mapping):
-                return value
-        return None
+        staged: dict[str, Path | None] = {
+            "world_model": None,
+            "last_iteration": None,
+            "mismatch": None,
+        }
+        if self.world_model is None:
+            return staged
+        staged["world_model"] = self.world_model.stage_into(workspace)
+        last_iteration = self.store.memory_root / "last_iteration.json"
+        if last_iteration.is_file():
+            target = workspace / "last_iteration.json"
+            if not target.exists():
+                shutil.copy2(last_iteration, target)
+            staged["last_iteration"] = target
+            info = read_json(last_iteration)
+            mismatch_path = info.get("mismatch_path")
+            if mismatch_path and Path(str(mismatch_path)).is_dir():
+                mismatch_dir = workspace / "mismatch_evidence"
+                if not mismatch_dir.exists():
+                    shutil.copytree(Path(str(mismatch_path)), mismatch_dir)
+                    try:
+                        stage_search_trace_evidence(
+                            store=self.store,
+                            candidate_id=str(info.get("candidate_id") or ""),
+                            destination=mismatch_dir / "candidate_traces",
+                            max_failure_traces=self.config.loop.max_failure_traces,
+                        )
+                    except (TraceEvidenceError, FileNotFoundError):
+                        pass
+                staged["mismatch"] = mismatch_dir
+        return staged
+
+    def _commit_world_model(self, workspace: Path, *, iteration: int) -> None:
+        """Copy the author's world-model file back; record whether it grew.
+
+        No fallback and no template: when the author skipped its distill, the
+        run records that fact instead of papering over it.
+        """
+
+        if self.world_model is None:
+            return
+        if self.world_model.commit_from(workspace):
+            self.store.append_event(
+                "world_model_updated",
+                iteration=iteration,
+                distills=self.world_model.distill_count,
+            )
+        elif (self.store.memory_root / "last_iteration.json").is_file():
+            self.store.append_event(
+                "world_model_not_updated",
+                iteration=iteration,
+            )
 
     def _author(
         self,
@@ -99,8 +142,6 @@ class PacketAuthor:
         state: RunState,
         iteration: int,
         iteration_dir: Path,
-        ut_memory_path: Path | None,
-        pending_reflection: Path | None,
     ) -> tuple[TestPacket, Path]:
         feedback = ""
         for attempt in range(1, self.config.loop.max_attempts_per_packet + 1):
@@ -119,25 +160,15 @@ class PacketAuthor:
                     destination=workspace / "trace_evidence",
                     max_failure_traces=self.config.loop.max_failure_traces,
                 )
-            memory_copy = workspace / "ut_design_world_model.md"
-            if ut_memory_path is not None and not memory_copy.exists():
-                shutil.copy2(ut_memory_path, memory_copy)
-            outcome_copy = workspace / "previous_outcome.json"
-            if pending_reflection is not None and not outcome_copy.exists():
-                shutil.copy2(pending_reflection, outcome_copy)
+            memory_inputs = self._stage_memory_inputs(workspace)
             prompt = test_author_prompt(
                 benchmark_context=self.benchmark.context(),
                 trace_manifest=trace_manifest,
                 incumbent_source=incumbent_copy,
-                ut_memory_path=(memory_copy if ut_memory_path is not None else None),
-                previous_outcome_path=(
-                    outcome_copy if pending_reflection is not None else None
-                ),
-                reflection_output_path=(
-                    workspace / "reflection.json"
-                    if pending_reflection is not None
-                    else None
-                ),
+                world_model_path=memory_inputs["world_model"],
+                last_iteration_path=memory_inputs["last_iteration"],
+                mismatch_path=memory_inputs["mismatch"],
+                iteration=iteration,
                 probes_supported=self.benchmark.supports_agent_probe,
                 target_api_env=self.config.benchmark.api_key_env,
                 output_dir=output,
@@ -158,6 +189,7 @@ class PacketAuthor:
                     / f"attempt_{attempt}"
                     / "agent",
                 )
+                self._commit_world_model(workspace, iteration=iteration)
                 if run.returncode != 0 or run.timed_out:
                     feedback = (
                         f"agent failed: returncode={run.returncode}, "

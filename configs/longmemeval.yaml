@@ -53,6 +53,3 @@ agents:
     model: gpt-5.6-terra
     reasoning_effort: high
     timeout_s: 3600
-
-memory:
-  max_world_model_lessons: 64
