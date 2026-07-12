@@ -7,8 +7,9 @@ from pathlib import Path
 
 from traceunit.benchmarks import build_benchmark
 from traceunit.benchmarks.pools import load_benchmark_plan
-from traceunit.config import load_config
+from traceunit.config import ProjectConfig, load_config
 from traceunit.final_evaluation import FinalEvaluationRunner
+from traceunit.io import read_json, write_json
 from traceunit.ontology import freeze_ontology
 from traceunit.optimizer import OptimizationLoop
 from traceunit.store import RunStore
@@ -24,11 +25,47 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("optimize", "prepare", "validate-config", "final-evaluate"):
         command = sub.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
+        if name == "optimize":
+            command.add_argument(
+                "--no-final",
+                action="store_true",
+                help="do not run the sealed final evaluation after search completes",
+            )
     inspect = sub.add_parser("inspect")
     inspect.add_argument("--run-dir", type=Path, required=True)
     packet = sub.add_parser("validate-packet")
     packet.add_argument("--bundle", type=Path, required=True)
     return parser
+
+
+def _final_evaluate(config: ProjectConfig) -> dict:
+    """Seal and run the final evaluation for a completed search run."""
+
+    store = RunStore(config.loop.run_dir)
+    state = store.load_state()
+    if state is None:
+        raise SystemExit(f"no completed search under {config.loop.run_dir}")
+    adapter = build_benchmark(config.benchmark)
+    freeze_ontology(store.ontology_path)
+    if not store.benchmark_plan_path.is_file():
+        raise SystemExit(
+            f"frozen benchmark plan is missing: {store.benchmark_plan_path}"
+        )
+    plan = load_benchmark_plan(store.benchmark_plan_path)
+    adapter.bind_plan(plan)
+    adapter.preflight()
+    runner = FinalEvaluationRunner(
+        store=store,
+        benchmark=adapter,
+        benchmark_plan=plan,
+    )
+    report = runner.run(runner.seal(state))
+    summary_path = config.loop.run_dir / "summary.json"
+    if summary_path.is_file():
+        summary = read_json(summary_path)
+        summary["final_evaluation"] = "opened"
+        write_json(summary_path, summary)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,29 +110,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "final-evaluate":
-        store = RunStore(config.loop.run_dir)
-        state = store.load_state()
-        if state is None:
-            raise SystemExit(f"no completed search under {config.loop.run_dir}")
-        adapter = build_benchmark(config.benchmark)
-        freeze_ontology(store.ontology_path)
-        if not store.benchmark_plan_path.is_file():
-            raise SystemExit(
-                f"frozen benchmark plan is missing: {store.benchmark_plan_path}"
-            )
-        plan = load_benchmark_plan(store.benchmark_plan_path)
-        adapter.bind_plan(plan)
-        adapter.preflight()
-        runner = FinalEvaluationRunner(
-            store=store,
-            benchmark=adapter,
-            benchmark_plan=plan,
-        )
-        report = runner.run(runner.seal(state))
+        report = _final_evaluate(config)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
     summary = OptimizationLoop(config).run()
     print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if not args.no_final and summary.get("status") in {"completed", "converged"}:
+        report = _final_evaluate(config)
+        print(json.dumps({"final_report": report}, indent=2, ensure_ascii=False))
     return 0
 
 

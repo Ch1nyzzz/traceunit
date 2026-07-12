@@ -1,6 +1,6 @@
 loop:
-  run_dir: ../runs/appworld_traceunit
-  run_id: appworld_traceunit
+  run_dir: ../runs/appworld_traceunit_v3
+  run_id: appworld_traceunit_v3
   iterations: 20
   resume: true
   max_failure_traces: 16
