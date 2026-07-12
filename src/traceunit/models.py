@@ -604,6 +604,10 @@ class RunState:
     quarantined_ids: list[str] = field(default_factory=list)
     preserved_packet_refs: list[dict[str, str]] = field(default_factory=list)
     latent_packet_refs: list[dict[str, str]] = field(default_factory=list)
+    # Rejected edits whose paired search score improved: rewarded but never
+    # certified. Kept as reference leads for later editors; certification
+    # still requires satisfying a future frozen contract.
+    lead_refs: list[dict[str, str]] = field(default_factory=list)
     active_packet_id: str = ""
     active_packet_path: str = ""
     active_packet_uses: int = 0
@@ -641,6 +645,10 @@ class RunState:
             latent_packet_refs=[
                 {str(key): str(item) for key, item in dict(ref).items()}
                 for ref in value.get("latent_packet_refs") or []
+            ],
+            lead_refs=[
+                {str(key): str(item) for key, item in dict(ref).items()}
+                for ref in value.get("lead_refs") or []
             ],
             active_packet_id=str(value.get("active_packet_id") or ""),
             active_packet_path=str(value.get("active_packet_path") or ""),

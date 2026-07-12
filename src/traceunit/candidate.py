@@ -71,6 +71,10 @@ class CandidateBuilder:
                     latent_path,
                     self.public_latent_capabilities(state, candidate_dir),
                 )
+            leads = self.public_leads(state, candidate_dir)
+            leads_path = candidate_dir / "leads.json" if leads else None
+            if leads_path is not None:
+                write_json(leads_path, {"leads": leads})
             prompt = candidate_edit_prompt(
                 benchmark_context=self.benchmark.context(),
                 candidate_id=candidate_id,
@@ -78,6 +82,7 @@ class CandidateBuilder:
                 source_dir=source,
                 public_packet_path=public_path,
                 latent_capabilities_path=latent_path,
+                leads_path=leads_path,
                 proposal_path=proposal_path,
                 target_api_env=self.config.benchmark.api_key_env,
             )
@@ -160,6 +165,35 @@ class CandidateBuilder:
                 }
             )
         return {"decisions": decisions}
+
+    def public_leads(
+        self, state: RunState, workspace: Path
+    ) -> list[dict[str, Any]]:
+        """Expose recent rewarded-but-uncertified diffs as reference leads."""
+
+        leads: list[dict[str, Any]] = []
+        for raw_ref in state.lead_refs[-5:]:
+            lead_dir = Path(str(raw_ref.get("path") or ""))
+            info_path = lead_dir / "lead.json"
+            diff_path = lead_dir / "candidate.diff"
+            if not info_path.is_file() or not diff_path.is_file():
+                continue
+            info = read_json(info_path)
+            staged = (
+                workspace / "leads" / str(info["candidate_id"]) / "candidate.diff"
+            )
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(diff_path, staged)
+            leads.append(
+                {
+                    "candidate_id": info.get("candidate_id"),
+                    "search_delta": info.get("search_delta"),
+                    "mechanism_claim": info.get("mechanism_claim"),
+                    "failed_contract_reasons": info.get("contract_reasons"),
+                    "diff_path": str(staged),
+                }
+            )
+        return leads
 
     def public_latent_capabilities(
         self, state: RunState, workspace: Path

@@ -611,12 +611,73 @@ class OptimizationLoop:
                 state.quarantined_ids.append(proposal.candidate_id)
             PacketAuthor.retire_active(state)
         else:
+            if (
+                evidence.search_delta is not None
+                and evidence.search_delta > self.config.decision.min_search_delta
+            ):
+                self._retain_lead(
+                    state=state,
+                    iteration=iteration,
+                    proposal=proposal,
+                    evidence=evidence,
+                )
             state.active_packet_uses += 1
             if state.active_packet_uses >= self.config.loop.max_attempts_per_packet:
                 PacketAuthor.retire_active(state)
         state.committed_iterations.append(iteration)
         self.store.save_state(state)
         return state
+
+    def _retain_lead(
+        self,
+        *,
+        state: RunState,
+        iteration: int,
+        proposal: CandidateProposal,
+        evidence: EvidenceRecord,
+    ) -> None:
+        """Keep a rewarded-but-uncertified edit as editor reference material.
+
+        The rejected diff improved paired search but failed its frozen
+        contract, so it earns no protocol status; later editors see it as a
+        lead, and certification still requires satisfying a future contract.
+        """
+
+        if any(
+            ref.get("candidate_id") == proposal.candidate_id
+            for ref in state.lead_refs
+        ):
+            return
+        diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
+        if not diff_path.is_file():
+            return
+        lead_dir = self.store.leads_root / proposal.candidate_id
+        lead_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(diff_path, lead_dir / "candidate.diff")
+        write_json(
+            lead_dir / "lead.json",
+            {
+                "candidate_id": proposal.candidate_id,
+                "iteration": iteration,
+                "search_delta": evidence.search_delta,
+                "primary_family": (
+                    evidence.primary_family.value if evidence.primary_family else ""
+                ),
+                "mechanism_claim": proposal.mechanism_claim,
+                "contract_reasons": list(
+                    evidence.metadata.get("candidate_contract_reasons") or []
+                ),
+            },
+        )
+        state.lead_refs.append(
+            {"candidate_id": proposal.candidate_id, "path": str(lead_dir)}
+        )
+        self.store.append_event(
+            "lead_retained",
+            iteration=iteration,
+            candidate_id=proposal.candidate_id,
+            search_delta=evidence.search_delta,
+        )
 
     def _retain_latent_packet(
         self,

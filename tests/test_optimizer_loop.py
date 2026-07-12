@@ -124,6 +124,9 @@ class FakeBenchmark(BenchmarkAdapter):
 
 
 class TestAuthor:
+    def __init__(self, expected: str = "good") -> None:
+        self.expected = expected
+
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "test_author"
         if "reflection.json" in prompt:
@@ -151,7 +154,8 @@ class TestAuthor:
             path.write_text(
                 "import os, pathlib\n"
                 "p = pathlib.Path(os.environ['TRACEUNIT_SOURCE']) / 'behavior.txt'\n"
-                "raise SystemExit(0 if p.read_text().strip() == 'good' else 1)\n",
+                f"raise SystemExit(0 if p.read_text().strip() == '{self.expected}'"
+                " else 1)\n",
                 encoding="utf-8",
             )
         regression.write_text(
@@ -524,6 +528,35 @@ def test_author_self_reflection_feeds_memory(tmp_path: Path) -> None:
         encoding="utf-8"
     )
     assert not (store.memory_root / "pending_reflection.json").exists()
+
+
+def test_rewarded_but_uncertified_reject_becomes_lead(tmp_path: Path) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL, iterations=2)
+    editor = SearchAgent()
+    OptimizationLoop(
+        config,
+        # score rewards 'good', but the frozen tests demand 'great': the edit
+        # improves paired search yet fails its contract -> reject + lead.
+        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        agents={"test_author": TestAuthor(expected="great"), "search": editor},
+    ).run()
+
+    run = config.loop.run_dir
+    state = json.loads((run / "run_state.json").read_text())
+    assert [ref["candidate_id"] for ref in state["lead_refs"]] == [
+        "iter001_candidate",
+        "iter002_candidate",
+    ]
+    lead_dir = run / "leads/iter001_candidate"
+    assert (lead_dir / "candidate.diff").read_text().strip()
+    lead = json.loads((lead_dir / "lead.json").read_text())
+    assert lead["search_delta"] > 0 and lead["contract_reasons"]
+    events = (run / "events.jsonl").read_text()
+    assert events.count('"lead_retained"') == 2
+    # The second editor saw the first lead as reference material.
+    assert "Leads:" in editor.prompts[1]
+    staged = run / "candidates/iter002_candidate/leads/iter001_candidate"
+    assert (staged / "candidate.diff").is_file()
 
 
 def test_ut_screening_skips_search_after_calibration(tmp_path: Path) -> None:

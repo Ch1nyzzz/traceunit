@@ -243,6 +243,7 @@ def candidate_edit_prompt(
     latent_capabilities_path: Path | None,
     proposal_path: Path,
     target_api_env: str | None = None,
+    leads_path: Path | None = None,
 ) -> str:
     proposal = {
         "candidate_id": candidate_id,
@@ -269,6 +270,16 @@ def candidate_edit_prompt(
         if latent_capabilities_path is not None
         else ""
     )
+    leads_guidance = (
+        f"Leads: {leads_path}\n"
+        "Each lead is an earlier rejected edit whose paired search score improved but "
+        "whose frozen contract failed: a rewarded yet uncertified direction, with its "
+        "diff as reference material. Rebuild a lead's mechanism when it genuinely serves "
+        "the current frozen contract; never apply a diff blindly, and the current public "
+        "contract remains the target."
+        if leads_path is not None
+        else ""
+    )
     return f"""You are the Candidate Editor.
 
 Benchmark contract:
@@ -280,6 +291,7 @@ Public frozen TestPacket: {public_packet_path}
 
 Implement one general mechanism-level edit that repairs the frozen public contract.
 {latent_guidance}
+{leads_guidance}
 Generalize beyond the visible reproducer. Do not inspect hidden tests, search-pool tasks,
 final tasks, evaluators, gold data, or task ids. Run the public test and a syntax/import
 smoke check before finishing; do not submit an edit whose public test still fails.
