@@ -32,6 +32,12 @@ from traceunit.trace_evidence import (
 )
 
 
+# Consecutive iteration skips (failed packet authoring or candidate build,
+# e.g. an exhausted agent quota) halt the run instead of burning the budget;
+# the skipped iterations are handed back and the run resumes later.
+MAX_CONSECUTIVE_SKIPS = 3
+
+
 class OptimizationLoop:
     """Orchestrate search; specialized modules own every protocol mechanism."""
 
@@ -119,10 +125,12 @@ class OptimizationLoop:
         if self.config.capabilities.online_ut_memory:
             self.world_model.ensure()
 
+        consecutive_skips = 0
         while state.next_iteration <= self.config.loop.iterations:
             iteration = state.next_iteration
             try:
                 state = self._run_iteration(state, iteration)
+                consecutive_skips = 0
             except NoFailureTraces:
                 state.status = "converged"
                 self.store.append_event(
@@ -133,10 +141,13 @@ class OptimizationLoop:
                 break
             except TestDesignFailure as exc:
                 state = self._skip_failed_test_design(state, iteration, exc)
+                consecutive_skips += 1
             except TraceEvidenceError as exc:
                 state = self._skip_failed_trace_evidence(state, iteration, exc)
+                consecutive_skips += 1
             except CandidateBuildError as exc:
                 state = self._skip_failed_candidate_build(state, iteration, exc)
+                consecutive_skips += 1
             except Exception as exc:
                 state.status = "error"
                 self.store.save_state(state)
@@ -146,6 +157,18 @@ class OptimizationLoop:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 raise
+            if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+                # Hand the skipped iterations back and stop: this pattern is
+                # an environment failure (e.g. agent quota), not evidence.
+                state.next_iteration -= consecutive_skips
+                state.status = "halted"
+                self.store.append_event(
+                    "run_halted_after_consecutive_skips",
+                    iteration=iteration,
+                    skips=consecutive_skips,
+                    resume_iteration=state.next_iteration,
+                )
+                break
 
         if state.status == "running":
             state.status = "completed"

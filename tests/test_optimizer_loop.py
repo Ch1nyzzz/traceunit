@@ -824,3 +824,48 @@ def test_proposer_sees_traces_score_and_world_model(tmp_path: Path) -> None:
     assert (candidate / "ut_design_world_model.md").is_file()
     staged = read_json(candidate / "trace_evidence/manifest.json")
     assert staged["traces"], "the incumbent's failing traces are staged"
+
+
+class FailingAuthor:
+    """An author whose agent always fails, e.g. an exhausted quota."""
+
+    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
+        result = _agent_result(role, log_dir)
+        return type(result)(
+            role=role,
+            returncode=1,
+            duration_s=0.0,
+            stdout_path=result.stdout_path,
+            stderr_path=result.stderr_path,
+            final_message_path=result.final_message_path,
+        )
+
+
+def test_consecutive_agent_failures_halt_and_hand_back_iterations(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL, iterations=10)
+    benchmark = FakeBenchmark(tmp_path, natural_gain=True)
+    summary = OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": FailingAuthor(), "search": SearchAgent()},
+    ).run()
+
+    assert summary["status"] == "halted"
+    # Three skipped iterations were handed back: the run resumes at iter 1.
+    state = read_json(config.loop.run_dir / "run_state.json")
+    assert state["next_iteration"] == 1
+    events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
+    assert '"run_halted_after_consecutive_skips"' in events
+    # Only the baseline touched the search pool.
+    assert benchmark.calls == ["search"]
+
+    # Resuming with a healthy author picks the budget back up.
+    resumed = OptimizationLoop(
+        config,
+        benchmark=benchmark,
+        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+    ).run()
+    assert resumed["status"] in {"completed", "converged"}
+    assert resumed["incumbent_id"] == "iter001_candidate"
