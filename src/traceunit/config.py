@@ -79,9 +79,13 @@ class BenchmarkConfig:
 
 @dataclass(frozen=True)
 class DecisionConfig:
-    max_regression_loss: float = 0.0
     min_search_delta: float = 0.0
     noninferiority_margin: float = 0.0
+    # How far a non-target capability's battery pass rate may drop before the
+    # unit verdict fails for collateral damage. 0.0 means no drop is allowed;
+    # relax slightly (e.g. 0.15) to tolerate one stochastic probe flip in a
+    # seven-instance group.
+    max_battery_regression: float = 0.0
 
 
 class ExperimentCondition(StrEnum):
@@ -114,10 +118,13 @@ class LoopConfig:
     # Authoring retries: how often the Test Author may retry a packet that
     # fails mechanical admission before the iteration is skipped.
     max_attempts_per_packet: int = 4
-    # Inner unit loop: after a proposed patch fails the frozen unit tests, the
-    # proposer receives the concrete failures and retries this many times
+    # Inner unit loop: after a proposed patch fails the capability battery,
+    # the proposer receives the concrete failures and retries this many times
     # before the (expensive) paired search evaluation runs anyway.
     max_inner_retries: int = 3
+    # Cap per capability group; the Test Author must retire before adding
+    # beyond it, which keeps the battery informative instead of hoarding.
+    max_instances_per_capability: int = 8
 
 
 @dataclass(frozen=True)
@@ -228,6 +235,9 @@ def load_config(path: Path) -> ProjectConfig:
         max_failure_traces=max(1, int(loop_raw.get("max_failure_traces", 8))),
         max_attempts_per_packet=max(1, int(loop_raw.get("max_attempts_per_packet", 4))),
         max_inner_retries=max(0, int(loop_raw.get("max_inner_retries", 3))),
+        max_instances_per_capability=max(
+            2, int(loop_raw.get("max_instances_per_capability", 8))
+        ),
     )
 
     worldcalib_root = (

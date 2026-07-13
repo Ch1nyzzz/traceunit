@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
 
-from traceunit.agents.prompts import regression_author_prompt
-from traceunit.agents.runner import WorkspaceAgent
+from traceunit.battery import (
+    Battery,
+    BatteryResult,
+    BatteryRunner,
+    battery_deltas,
+)
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.config import ProjectConfig
 from traceunit.decision import DecisionPolicy
-from traceunit.io import copy_source, read_json, write_json
+from traceunit.io import read_json
 from traceunit.models import (
     BenchmarkEvaluation,
     BenchmarkPlan,
@@ -19,26 +22,15 @@ from traceunit.models import (
     EvidenceRecord,
     PoolSliceRef,
     RunState,
-    TestExecution,
-    TestPacket,
-    TestTier,
+    UnitFamily,
 )
 from traceunit.paired import paired_task_differences
-from traceunit.replay import FrozenPacketRef, PacketReplayer, PacketReplayResult
 from traceunit.store import RunStore
-from traceunit.tests_runtime import (
-    InvalidTestPacket,
-    admission_contract,
-    candidate_contract,
-    load_test_packet,
-    paired_test_metrics,
-    run_test_cases,
-)
 
 
 @dataclass(frozen=True)
 class UnitEvidence:
-    """One complete unit verdict for a candidate source against a frozen packet.
+    """One complete battery verdict for a candidate source.
 
     Produced by ``UnitEvidenceRunner`` both inside the proposer's inner retry
     loop (as concrete feedback) and as the authoritative unit half of the
@@ -46,35 +38,27 @@ class UnitEvidence:
     """
 
     violations: tuple[str, ...]
-    metrics: dict[str, float] = field(default_factory=dict)
-    contract_passed: bool = False
-    contract_reasons: tuple[str, ...] = ()
-    bridge_contract_passed: bool = False
-    bridge_contract_reasons: tuple[str, ...] = ()
-    has_bridge: bool = False
-    preservation: tuple[PacketReplayResult, ...] = ()
-    incumbent_results: tuple[TestExecution, ...] = ()
-    candidate_results: tuple[TestExecution, ...] = ()
+    target_capability: str = ""
+    results: tuple[BatteryResult, ...] = ()
+    deltas: dict[str, dict] = field(default_factory=dict)
+    target_improved: bool = False
+    collateral_ok: bool = False
+    target_delta: float = 0.0
+    collateral_delta: float = 0.0
     attempts: int = 1
     unit_seconds: float = 0.0
     probe_calls: int = 0
     probe_tokens: int = 0
 
-    @property
-    def preservation_passed(self) -> bool:
-        return all(item.contract_passed for item in self.preservation)
+    def unit_ok(self) -> bool:
+        return not self.violations and self.target_improved and self.collateral_ok
 
-    def unit_ok(self, max_regression_loss: float) -> bool:
-        return (
-            not self.violations
-            and self.contract_passed
-            and self.preservation_passed
-            and self.metrics.get("regression_loss", 0.0) <= max_regression_loss
-        )
+    def instance_results(self) -> dict[str, bool]:
+        return {item.instance_id: item.passed for item in self.results}
 
 
 class UnitEvidenceRunner:
-    """Run the frozen packet plus all preserved contracts against one source."""
+    """Run the full capability battery against one candidate source."""
 
     def __init__(
         self,
@@ -82,22 +66,25 @@ class UnitEvidenceRunner:
         config: ProjectConfig,
         store: RunStore,
         benchmark: BenchmarkAdapter,
+        battery: Battery,
     ) -> None:
         self.config = config
         self.store = store
         self.benchmark = benchmark
+        self.battery = battery
+        self.runner = BatteryRunner(
+            battery=battery,
+            python=config.benchmark.unit_python,
+            probe_runner=benchmark.run_agent_probe,
+        )
 
     def run(
         self,
         *,
-        packet: TestPacket,
-        packet_path: Path,
-        incumbent_source: Path,
+        target_capability: str,
         candidate_source: Path,
-        preserved_refs: Iterable[dict[str, str]],
         diff_text: str,
         output_dir: Path,
-        incumbent_results: tuple[TestExecution, ...] | None = None,
     ) -> UnitEvidence:
         violations = mechanical_violations(
             benchmark=self.benchmark,
@@ -106,62 +93,44 @@ class UnitEvidenceRunner:
             out_dir=output_dir / "smoke",
         )
         if violations:
-            return UnitEvidence(violations=tuple(violations))
-        if incumbent_results is None:
-            incumbent_results = run_test_cases(
-                packet=packet,
-                bundle=packet_path,
-                source=incumbent_source,
-                subject="incumbent",
-                output_dir=output_dir / "incumbent",
-                python=self.config.benchmark.unit_python,
-                probe_runner=self.benchmark.run_agent_probe,
+            return UnitEvidence(
+                violations=tuple(violations), target_capability=target_capability
             )
-        candidate_results = run_test_cases(
-            packet=packet,
-            bundle=packet_path,
+        results = self.runner.run(
             source=candidate_source,
             subject="candidate",
-            output_dir=output_dir / "candidate",
-            python=self.config.benchmark.unit_python,
-            probe_runner=self.benchmark.run_agent_probe,
+            output_dir=output_dir / "battery",
         )
-        metrics = paired_test_metrics(packet, incumbent_results, candidate_results)
-        contract_passed, contract_reasons = candidate_contract(
-            packet, candidate_results
+        deltas = battery_deltas(
+            instances=self.battery.load(),
+            reference=self.battery.load_reference(),
+            results=results,
         )
-        has_bridge = any(case.tier is TestTier.BRIDGE for case in packet.cases)
-        bridge_contract_passed, bridge_contract_reasons = candidate_contract(
-            packet,
-            candidate_results,
-            tiers=frozenset({TestTier.BRIDGE}),
+        target = deltas.get(target_capability) or {}
+        target_improved = int(target.get("candidate_passed") or 0) > int(
+            target.get("incumbent_passed") or 0
         )
-        if not has_bridge:
-            bridge_contract_passed = False
-        preservation = PacketReplayer(
-            packet_root=self.store.packet_store_root,
-            python=self.config.benchmark.unit_python,
-            probe_runner=self.benchmark.run_agent_probe,
-        ).replay(
-            refs=(FrozenPacketRef.from_dict(item) for item in preserved_refs),
-            candidate_source=candidate_source,
-            output_dir=output_dir / "preservation",
+        collateral = [
+            float(delta.get("delta") or 0.0)
+            for capability, delta in deltas.items()
+            if capability != target_capability
+        ]
+        collateral_delta = min(collateral, default=0.0)
+        collateral_ok = (
+            collateral_delta >= -self.config.decision.max_battery_regression
         )
-        executions = [*incumbent_results, *candidate_results]
         return UnitEvidence(
             violations=(),
-            metrics=metrics,
-            contract_passed=contract_passed,
-            contract_reasons=tuple(contract_reasons),
-            bridge_contract_passed=bridge_contract_passed,
-            bridge_contract_reasons=tuple(bridge_contract_reasons),
-            has_bridge=has_bridge,
-            preservation=preservation,
-            incumbent_results=tuple(incumbent_results),
-            candidate_results=tuple(candidate_results),
-            unit_seconds=sum(item.duration_s for item in executions),
-            probe_calls=sum(item.model_calls for item in executions),
-            probe_tokens=sum(item.tokens for item in executions),
+            target_capability=target_capability,
+            results=results,
+            deltas={key: dict(value) for key, value in deltas.items()},
+            target_improved=target_improved,
+            collateral_ok=collateral_ok,
+            target_delta=float(target.get("delta") or 0.0),
+            collateral_delta=collateral_delta,
+            unit_seconds=sum(item.duration_s for item in results),
+            probe_calls=sum(item.model_calls for item in results),
+            probe_tokens=sum(item.tokens for item in results),
         )
 
 
@@ -174,14 +143,12 @@ class CandidateEvaluator:
         benchmark: BenchmarkAdapter,
         benchmark_plan: BenchmarkPlan,
         policy: DecisionPolicy,
-        regression_author: WorkspaceAgent | None,
     ) -> None:
         self.config = config
         self.store = store
         self.benchmark = benchmark
         self.plan = benchmark_plan
         self.policy = policy
-        self.regression_author = regression_author
 
     def evaluate_candidate(
         self,
@@ -190,8 +157,8 @@ class CandidateEvaluator:
         iteration: int,
         iteration_dir: Path,
         proposal: CandidateProposal,
-        packet: TestPacket,
-        packet_path: Path,
+        target_capability: str,
+        target_family: UnitFamily,
         candidate_source: Path,
         diff_text: str,
         unit: UnitEvidence,
@@ -200,9 +167,10 @@ class CandidateEvaluator:
             "parent_id": state.incumbent_id,
             "parent_source": state.incumbent_source,
             "candidate_source": str(candidate_source.resolve()),
-            "has_bridge": unit.has_bridge,
             "violations": list(unit.violations),
             "unit_attempts": unit.attempts,
+            "battery_deltas": unit.deltas,
+            "battery_instance_results": unit.instance_results(),
             "costs": {
                 "unit_test_wall_seconds": unit.unit_seconds,
                 "model_probe_calls": unit.probe_calls,
@@ -213,16 +181,11 @@ class CandidateEvaluator:
             evidence = EvidenceRecord(
                 iteration=iteration,
                 candidate_id=proposal.candidate_id,
-                packet_id=packet.packet_id,
-                public_gain=0.0,
-                hidden_gain=0.0,
-                bridge_gain=0.0,
-                regression_loss=1.0,
-                contract_passed=False,
-                bridge_contract_passed=False,
-                primary_family=packet.primary_family,
+                target_capability=target_capability,
+                target_improved=False,
+                collateral_ok=False,
+                primary_family=target_family,
                 intervention_kind=proposal.intervention_kind,
-                preservation_passed=False,
                 metadata=metadata,
             )
             return evidence, DecisionRecord(
@@ -234,46 +197,16 @@ class CandidateEvaluator:
                 evidence=evidence,
             )
 
-        regression_loss = max(
-            unit.metrics["regression_loss"],
-            self._regression_loss(
-                iteration_dir=iteration_dir,
-                state=state,
-                proposal=proposal,
-                candidate_source=candidate_source,
-                diff_text=diff_text,
-            ),
-        )
-        metadata.update(
-            {
-                "candidate_contract_passed": unit.contract_passed,
-                "candidate_contract_reasons": list(unit.contract_reasons),
-                "bridge_contract_passed": unit.bridge_contract_passed,
-                "bridge_contract_reasons": list(unit.bridge_contract_reasons),
-                "preservation_replay": [
-                    item.to_dict() for item in unit.preservation
-                ],
-                "incumbent_test_results": [
-                    result.to_dict() for result in unit.incumbent_results
-                ],
-                "candidate_test_results": [
-                    result.to_dict() for result in unit.candidate_results
-                ],
-            }
-        )
         evidence = EvidenceRecord(
             iteration=iteration,
             candidate_id=proposal.candidate_id,
-            packet_id=packet.packet_id,
-            public_gain=unit.metrics["public_gain"],
-            hidden_gain=unit.metrics["hidden_gain"],
-            bridge_gain=unit.metrics["bridge_gain"],
-            regression_loss=regression_loss,
-            contract_passed=unit.contract_passed,
-            bridge_contract_passed=unit.bridge_contract_passed,
-            primary_family=packet.primary_family,
+            target_capability=target_capability,
+            target_improved=unit.target_improved,
+            collateral_ok=unit.collateral_ok,
+            target_delta=unit.target_delta,
+            collateral_delta=unit.collateral_delta,
+            primary_family=target_family,
             intervention_kind=proposal.intervention_kind,
-            preservation_passed=unit.preservation_passed,
             metadata=metadata,
         )
         candidate_eval = self.evaluate_pool(
@@ -322,69 +255,6 @@ class CandidateEvaluator:
         path = self.store.evaluation_dir(parent_id, self.plan.search.slice_id)
         parent = BenchmarkEvaluation.from_dict(read_json(path / "evaluation.json"))
         return paired_task_differences(parent, candidate)
-
-    def _regression_loss(
-        self,
-        *,
-        iteration_dir: Path,
-        state: RunState,
-        proposal: CandidateProposal,
-        candidate_source: Path,
-        diff_text: str,
-    ) -> float:
-        if self.regression_author is None:
-            return 0.0
-        workspace = iteration_dir / "regression_author" / "workspace"
-        incumbent = workspace / "incumbent_source"
-        candidate = workspace / "candidate_source"
-        copy_source(Path(state.incumbent_source), incumbent)
-        copy_source(candidate_source, candidate)
-        diff_path = workspace / "candidate.diff"
-        diff_path.parent.mkdir(parents=True, exist_ok=True)
-        diff_path.write_text(diff_text, encoding="utf-8")
-        proposal_path = workspace / "proposal.json"
-        write_json(proposal_path, proposal.to_dict())
-        output = workspace / "output"
-        run = self.regression_author.run(
-            role="regression_author",
-            prompt=regression_author_prompt(
-                benchmark_context=self.benchmark.context(),
-                incumbent_source=incumbent,
-                candidate_source=candidate,
-                diff_path=diff_path,
-                proposal_path=proposal_path,
-                output_dir=output,
-            ),
-            workspace=workspace,
-            log_dir=iteration_dir / "regression_author" / "agent",
-        )
-        if run.returncode != 0 or run.timed_out:
-            return 1.0
-        try:
-            packet = load_test_packet(output)
-        except InvalidTestPacket:
-            return 1.0
-        incumbent_results = run_test_cases(
-            packet=packet,
-            bundle=output,
-            source=Path(state.incumbent_source),
-            subject="incumbent",
-            output_dir=iteration_dir / "regression_author" / "incumbent",
-            python=self.config.benchmark.unit_python,
-        )
-        admitted, _ = admission_contract(packet, incumbent_results)
-        if not admitted:
-            return 1.0
-        candidate_results = run_test_cases(
-            packet=packet,
-            bundle=output,
-            source=candidate_source,
-            subject="candidate",
-            output_dir=iteration_dir / "regression_author" / "candidate",
-            python=self.config.benchmark.unit_python,
-        )
-        passed, _ = candidate_contract(packet, candidate_results)
-        return 0.0 if passed else 1.0
 
 
 def _external_symlink_violations(source: Path) -> list[str]:

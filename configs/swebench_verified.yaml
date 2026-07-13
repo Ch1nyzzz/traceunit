@@ -8,6 +8,8 @@ loop:
   # A patch that fails the frozen unit tests goes back to the proposer with
   # the concrete failures this many times before search runs anyway.
   max_inner_retries: 3
+  # Cap per capability group; the Test Author retires before adding more.
+  max_instances_per_capability: 8
 
 protocol:
   condition: c3_full
@@ -54,8 +56,10 @@ agents:
     enabled: false
 
 decision:
-  max_regression_loss: 0.0
   min_search_delta: 0.0
+  # A non-target capability group may not drop below its incumbent pass
+  # rate by more than this fraction (collateral damage tolerance).
+  max_battery_regression: 0.0
   # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
   # nondeterministic model, a two-task paired swing is ordinary noise, so the
   # archive band tolerates it; archival is a record and never moves the

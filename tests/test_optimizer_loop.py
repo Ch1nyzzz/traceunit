@@ -31,8 +31,8 @@ class FakeBenchmark(BenchmarkAdapter):
     """One or more synthetic tasks scored by a per-task rule on behavior.txt.
 
     ``scorers`` maps task_id -> callable(text) -> float. The default single
-    task rewards behavior 'good' when ``natural_gain`` is set, so the stock
-    editor (writes 'good') improves paired search.
+    task rewards behavior exactly 'good' when ``natural_gain`` is set, so the
+    stock editor (writes 'good') improves paired search.
     """
 
     name = "fake"
@@ -149,146 +149,172 @@ class FakeBenchmark(BenchmarkAdapter):
         return []
 
 
-class TestAuthor:
-    def __init__(self, expected: str = "good") -> None:
-        self.expected = expected
+def _write_instance_bundle(
+    output: Path,
+    *,
+    instance_id: str,
+    family: str,
+    condition: str,
+) -> None:
+    """An unfrozen battery-instance bundle whose probe runs ``condition`` as a
+    python expression over the source's behavior.txt content bound to `text`."""
+
+    bundle = output / "instances" / instance_id
+    test_path = bundle / "tests/public/probe.py"
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text(
+        "import os, pathlib\n"
+        "text = (pathlib.Path(os.environ['TRACEUNIT_SOURCE'])"
+        " / 'behavior.txt').read_text()\n"
+        f"raise SystemExit(0 if ({condition}) else 1)\n",
+        encoding="utf-8",
+    )
+    write_json(
+        bundle / "test_packet.json",
+        {
+            "packet_id": instance_id,
+            "version": 1,
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "family": family,
+                    "intervention_kind": "local_repair",
+                    "mechanism": "capability probe",
+                    "target_boundary": "one decision boundary",
+                    "claim": "the capability is deficient",
+                    "evidence_trace_ids": ["trace"],
+                }
+            ],
+            "target_hypothesis_id": "h1",
+            "primary_family": family,
+            "public_contract": "capability check",
+            "hidden_variant_strategy": "cross-domain siblings",
+            "cases": [
+                {
+                    "case_id": "probe",
+                    "tier": "public",
+                    "evidence_role": "target_reproducer",
+                    "path": "tests/public/probe.py",
+                    "driver": "python",
+                    "expected_incumbent_pass": False,
+                    "expected_candidate_pass": True,
+                }
+            ],
+            "metadata": {"packet_kind": "battery_instance"},
+        },
+    )
+
+
+class BatteryAuthorAgent:
+    """Cold start builds a target group (two variants) plus a guard group;
+    warm iterations distill into the world model and leave the battery as is.
+    """
+
+    def __init__(self, target_text: str = "good") -> None:
+        self.target_text = target_text
 
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "test_author"
         world_model = workspace / "ut_design_world_model.md"
         if world_model.is_file() and "distill" in prompt:
-            marker = ""
             if (workspace / "last_iteration.json").is_file():
                 info = read_json(workspace / "last_iteration.json")
-                marker = (
-                    f"\n## iter_{int(info['iteration']):03d} distill\n"
-                    f"- Fake author lesson: decision was {info['decision']} with "
-                    f"delta {info['search_delta']}.\n"
-                )
-            if marker:
                 world_model.write_text(
-                    world_model.read_text(encoding="utf-8") + marker,
+                    world_model.read_text(encoding="utf-8")
+                    + f"\n## iter_{int(info['iteration']):03d} distill\n"
+                    f"- Fake author lesson: decision was {info['decision']} with "
+                    f"delta {info['search_delta']}.\n",
                     encoding="utf-8",
                 )
         output = workspace / "output"
-        public = output / "tests/public/target.py"
-        hidden = output / "tests/hidden/sibling.py"
-        bridge = output / "tests/hidden/bridge.py"
-        regression = output / "tests/hidden/regression.py"
-        witness = output / "tests/hidden/positive_witness.py"
-        for path in (public, hidden, bridge):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                "import os, pathlib\n"
-                "p = pathlib.Path(os.environ['TRACEUNIT_SOURCE']) / 'behavior.txt'\n"
-                f"raise SystemExit(0 if p.read_text().strip() == '{self.expected}'"
-                " else 1)\n",
-                encoding="utf-8",
-            )
-        regression.write_text(
-            "import os, pathlib\n"
-            "p = pathlib.Path(os.environ['TRACEUNIT_SOURCE']) / 'behavior.txt'\n"
-            "raise SystemExit(0 if p.exists() else 1)\n",
-            encoding="utf-8",
-        )
-        witness.write_text("raise SystemExit(0)\n", encoding="utf-8")
-        write_json(
-            output / "test_packet.json",
-            {
-                "packet_id": "behavior-packet",
-                "version": 1,
-                "hypotheses": [
+        state = read_json(workspace / "battery_state.json")
+        cold_start = not state["capabilities"]
+        update: dict = {
+            "target_capability": "behavior-repair",
+            "target_family": "verification",
+            "capability_descriptions": {},
+            "new_instances": [],
+            "retire_instance_ids": [],
+        }
+        if cold_start:
+            update["capability_descriptions"] = {
+                "behavior-repair": "the policy produces the repaired behavior",
+                "stability-guard": "unrelated behavior stays intact",
+            }
+            for suffix in ("a", "b"):
+                instance_id = f"behavior-repair-{suffix}"
+                _write_instance_bundle(
+                    output,
+                    instance_id=instance_id,
+                    family="verification",
+                    condition=f"'{self.target_text}' in text",
+                )
+                update["new_instances"].append(
                     {
-                        "hypothesis_id": "h1",
+                        "instance_id": instance_id,
+                        "capability": "behavior-repair",
                         "family": "verification",
-                        "intervention_kind": "local_repair",
-                        "mechanism": "behavior",
-                        "target_boundary": "behavior file",
-                        "claim": "candidate changes bad to good",
-                        "evidence_trace_ids": ["trace"],
-                        "alternatives": ["h2"],
-                        "confidence": 1.0,
-                    },
-                    {
-                        "hypothesis_id": "h2",
-                        "family": "context",
-                        "intervention_kind": "orchestration_change",
-                        "mechanism": "missing file",
-                        "target_boundary": "behavior file existence",
-                        "claim": "the behavior file is absent",
-                        "evidence_trace_ids": ["trace"],
-                        "alternatives": ["h1"],
-                        "confidence": 0.0,
-                    },
-                ],
-                "target_hypothesis_id": "h1",
-                "primary_family": "verification",
-                "public_contract": "behavior must be good",
-                "hidden_variant_strategy": "same mechanism with a structural variant",
-                "cases": [
-                    _case("public", "public", "tests/public/target.py", False),
-                    _case("hidden", "hidden", "tests/hidden/sibling.py", False),
-                    _case("bridge", "bridge", "tests/hidden/bridge.py", False),
-                    _case(
-                        "regression", "regression", "tests/hidden/regression.py", True
-                    ),
-                    {
-                        **_case(
-                            "positive_witness",
-                            "admission",
-                            "tests/hidden/positive_witness.py",
-                            True,
-                        ),
-                    },
-                ],
-                "metadata": {},
-            },
-        )
+                        "description": f"variant {suffix}: behavior contains "
+                        f"'{self.target_text}'",
+                        "expected_incumbent_pass": False,
+                        "bundle": f"instances/{instance_id}",
+                    }
+                )
+            _write_instance_bundle(
+                output,
+                instance_id="stability-guard-a",
+                family="state",
+                condition="'toxic' not in text",
+            )
+            update["new_instances"].append(
+                {
+                    "instance_id": "stability-guard-a",
+                    "capability": "stability-guard",
+                    "family": "state",
+                    "description": "behavior must not become toxic",
+                    "expected_incumbent_pass": True,
+                    "bundle": "instances/stability-guard-a",
+                }
+            )
+        output.mkdir(parents=True, exist_ok=True)
+        write_json(output / "battery_update.json", update)
         return _agent_result(role, log_dir)
 
 
 class SearchAgent:
-    def __init__(self) -> None:
+    def __init__(self, text: str = "good") -> None:
+        self.text = text
         self.prompts: list[str] = []
 
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         assert role == "candidate_editor"
         self.prompts.append(prompt)
-        (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
+        (workspace / "source/behavior.txt").write_text(self.text, encoding="utf-8")
         write_json(
             workspace / "proposal.json",
             {
                 "candidate_id": workspace.name,
                 "parent_id": "baseline",
-                "hypothesis_id": "h1",
-                "intervention_kind": "local_repair",
                 "mechanism_claim": "change behavior from bad to good",
-                "predicted_effect": "unit and search score improve",
+                "predicted_effect": "battery and search improve",
                 "regression_risks": [],
             },
         )
         return _agent_result(role, log_dir)
 
 
-class BadEditor:
-    """An editor whose change never satisfies the frozen contract."""
+class BadEditor(SearchAgent):
+    """An editor whose change never satisfies the battery."""
 
-    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
-        assert role == "candidate_editor"
-        (workspace / "source/behavior.txt").write_text("still-bad", encoding="utf-8")
-        write_json(
-            workspace / "proposal.json",
-            {
-                "candidate_id": workspace.name,
-                "parent_id": "baseline",
-                "hypothesis_id": "h1",
-                "intervention_kind": "local_repair",
-                "mechanism_claim": "claims to fix behavior but does not",
-                "predicted_effect": "none",
-                "regression_risks": [],
-            },
-        )
-        return _agent_result(role, log_dir)
+    def __init__(self) -> None:
+        super().__init__(text="still-bad")
+
+
+class ToxicEditor(SearchAgent):
+    """Repairs the target behavior while damaging the guard capability."""
+
+    def __init__(self) -> None:
+        super().__init__(text="good but toxic")
 
 
 class ScoreOnlyAgent:
@@ -307,25 +333,6 @@ class ScoreOnlyAgent:
             },
         )
         return _agent_result(role, log_dir)
-
-
-def _case(case_id: str, tier: str, path: str, incumbent_pass: bool):
-    roles = {
-        "public": "target_reproducer",
-        "hidden": "structural_sibling",
-        "bridge": "downstream_bridge",
-        "regression": "off_target_control",
-        "admission": "positive_witness",
-    }
-    return {
-        "case_id": case_id,
-        "tier": tier,
-        "evidence_role": roles[tier],
-        "path": path,
-        "driver": "python",
-        "expected_incumbent_pass": incumbent_pass,
-        "expected_candidate_pass": True,
-    }
 
 
 def _agent_result(role: str, log_dir: Path) -> AgentRunResult:
@@ -357,25 +364,36 @@ def _config(
         agents=AgentsConfig(
             test_author=AgentConfig(enabled=False),
             search=AgentConfig(enabled=False),
-            regression_author=AgentConfig(enabled=False),
         ),
         protocol=ProtocolConfig(condition=condition),
     )
 
 
-def test_search_promotes_without_opening_final_pool(tmp_path: Path) -> None:
+def test_search_promotes_and_updates_battery_reference(tmp_path: Path) -> None:
     config = _config(tmp_path)
     benchmark = FakeBenchmark(tmp_path, natural_gain=True)
     summary = OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
     assert summary["incumbent_id"] == "iter001_candidate"
     assert summary["promoted_ids"] == ["baseline", "iter001_candidate"]
     assert summary["final_evaluation"] == "not_opened"
     assert benchmark.calls == ["search", "search"]
     assert not (config.loop.run_dir / "sealed/final").exists()
+    # Cold start built the battery; the promotion refreshed the reference.
+    reference = read_json(config.loop.run_dir / "battery/incumbent_results.json")
+    assert reference == {
+        "behavior-repair-a": True,
+        "behavior-repair-b": True,
+        "stability-guard-a": True,
+    }
+    groups = {
+        item["capability"]: item for item in summary["battery"]["capabilities"]
+    }
+    assert set(groups) == {"behavior-repair", "stability-guard"}
+    assert summary["calibration_rows"] == 1
 
 
 def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None:
@@ -384,7 +402,7 @@ def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None
     OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
     store = RunStore(config.loop.run_dir)
     state = store.load_state()
@@ -402,13 +420,13 @@ def test_final_evaluation_is_a_separate_sealed_operation(tmp_path: Path) -> None
 
 
 def test_unit_pass_with_flat_search_is_archived_as_record(tmp_path: Path) -> None:
-    """Cell 2: contract passed, paired search flat -> archive a plain record."""
+    """Cell 2: battery improved, paired search flat -> archive a plain record."""
 
     config = _config(tmp_path)
     summary = OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=False),
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
     assert summary["incumbent_id"] == "baseline"
     assert summary["archived_ids"] == ["iter001_candidate"]
@@ -416,43 +434,47 @@ def test_unit_pass_with_flat_search_is_archived_as_record(tmp_path: Path) -> Non
     archive_dir = store.archive_root / "iter001_candidate"
     record = read_json(archive_dir / "record.json")
     assert record["kind"] == "unit_passed_search_flat"
-    assert record["contract_passed"] is True
+    assert record["target_improved"] is True
     assert record["search_delta"] == 0.0
     assert "behavior.txt" in (archive_dir / "candidate.diff").read_text()
-    # An archive is a record, not a capability: nothing is replayed later.
     assert not (config.loop.run_dir / "mismatch").exists()
     decision = read_json(config.loop.run_dir / "iterations/iter_001/decision.json")
     assert decision["decision"] == "archive"
+    # The reference is untouched: archives never move the incumbent.
+    reference = read_json(config.loop.run_dir / "battery/incumbent_results.json")
+    assert reference["behavior-repair-a"] is False
 
 
-def test_search_improvement_with_failed_contract_is_archived_and_staged(
+def test_search_improvement_with_failed_battery_is_archived_and_staged(
     tmp_path: Path,
 ) -> None:
-    """Cell 4: search improved, contract failed -> archive + mismatch record."""
+    """Cell 4: search improved, battery not certified -> archive + mismatch."""
 
     config = _config(tmp_path, ExperimentCondition.FULL)
     OptimizationLoop(
         config,
-        # score rewards 'good', but the frozen tests demand 'great': the edit
-        # improves paired search yet fails its contract.
+        # score rewards 'good', but the battery demands 'great': the edit
+        # improves paired search yet fails its target group.
         benchmark=FakeBenchmark(tmp_path, natural_gain=True),
-        agents={"test_author": TestAuthor(expected="great"), "search": SearchAgent()},
+        agents={
+            "test_author": BatteryAuthorAgent(target_text="great"),
+            "search": SearchAgent(),
+        },
     ).run()
 
     run = config.loop.run_dir
     decision = read_json(run / "iterations/iter_001/decision.json")
     assert decision["decision"] == "archive"
-    assert "unit contract failed" in decision["reason"]
+    assert "battery did not certify" in decision["reason"]
     record = read_json(run / "archive/iter001_candidate/record.json")
     assert record["kind"] == "search_improved_unit_failed"
     assert record["search_delta"] > 0
-    assert record["unit_failure_reasons"]
+    assert record["target_improved"] is False
     mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
     assert mismatch["kind"] == "search_improved_unit_failed"
-    assert mismatch["contract_passed"] is False
+    assert mismatch["target_capability"] == "behavior-repair"
     assert any(flip["flipped"] for flip in mismatch["task_flips"])
     assert (run / "mismatch/iter_001/candidate.diff").is_file()
-    # The incumbent did not move.
     state = json.loads((run / "run_state.json").read_text())
     assert state["incumbent_id"] == "baseline"
     assert state["archived_ids"] == ["iter001_candidate"]
@@ -461,7 +483,7 @@ def test_search_improvement_with_failed_contract_is_archived_and_staged(
 def test_unit_pass_with_search_regression_is_rejected_as_mismatch(
     tmp_path: Path,
 ) -> None:
-    """Cell 3: contract passed, paired search regressed -> reject + mismatch."""
+    """Cell 3: battery improved, paired search regressed -> reject + mismatch."""
 
     config = _config(tmp_path, ExperimentCondition.FULL)
     benchmark = FakeBenchmark(
@@ -478,14 +500,14 @@ def test_unit_pass_with_search_regression_is_rejected_as_mismatch(
     OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     run = config.loop.run_dir
     decision = read_json(run / "iterations/iter_001/decision.json")
     assert decision["decision"] == "reject"
-    assert "deviated from the search distribution" in decision["reason"]
-    assert decision["evidence"]["contract_passed"] is True
+    assert "deviates from the search distribution" in decision["reason"]
+    assert decision["evidence"]["target_improved"] is True
     assert decision["evidence"]["search_delta"] < 0
     mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
     assert mismatch["kind"] == "unit_passed_search_regressed"
@@ -498,21 +520,42 @@ def test_unit_pass_with_search_regression_is_rejected_as_mismatch(
 
 
 def test_both_failed_is_a_plain_reject(tmp_path: Path) -> None:
-    """Cell 5: contract failed and search flat -> plain reject, no records."""
+    """Cell 5: battery not improved and search flat -> plain reject."""
 
     config = _config(tmp_path, ExperimentCondition.FULL)
     OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=False),
-        agents={"test_author": TestAuthor(), "search": BadEditor()},
+        agents={"test_author": BatteryAuthorAgent(), "search": BadEditor()},
     ).run()
 
     run = config.loop.run_dir
     decision = read_json(run / "iterations/iter_001/decision.json")
     assert decision["decision"] == "reject"
-    assert "neither the unit contract nor paired search" in decision["reason"]
+    assert "neither the target capability nor paired search" in decision["reason"]
     assert not (run / "mismatch").exists()
     assert not (run / "archive").exists()
+
+
+def test_collateral_damage_fails_the_battery_verdict(tmp_path: Path) -> None:
+    """An edit that repairs the target while breaking another capability group
+    is a unit failure even though the target group improved."""
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=False),
+        agents={"test_author": BatteryAuthorAgent(), "search": ToxicEditor()},
+    ).run()
+
+    decision = read_json(
+        config.loop.run_dir / "iterations/iter_001/decision.json"
+    )
+    assert decision["decision"] == "reject"
+    assert "damaged other capabilities" in decision["reason"]
+    assert decision["evidence"]["target_improved"] is True
+    assert decision["evidence"]["collateral_ok"] is False
+    assert decision["evidence"]["collateral_delta"] == -1.0
 
 
 def test_later_editor_sees_archive_records(tmp_path: Path) -> None:
@@ -521,7 +564,7 @@ def test_later_editor_sees_archive_records(tmp_path: Path) -> None:
     OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=False),
-        agents={"test_author": TestAuthor(), "search": editor},
+        agents={"test_author": BatteryAuthorAgent(), "search": editor},
     ).run()
 
     # Iteration 1 archived; iteration 2's editor received the staged record.
@@ -558,11 +601,7 @@ def test_score_only_condition_has_no_unit_archive_or_memory_artifacts(
         "online_ut_memory": False,
     }
     assert benchmark.calls == ["search", "search"]
-    for name in (
-        "test_library",
-        "frozen_packets",
-        "ut_memory",
-    ):
+    for name in ("battery", "ut_memory"):
         assert not (config.loop.run_dir / name).exists()
     evidence = read_json(config.loop.run_dir / "iterations/iter_001/evidence.json")
     assert set(evidence) == {
@@ -582,23 +621,21 @@ def test_full_condition_records_last_iteration_for_the_next_author(
     summary = OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=True),
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     store = RunStore(config.loop.run_dir)
     assert store.ut_world_model_path.is_file()
     content = store.ut_world_model_path.read_text(encoding="utf-8")
     assert content.startswith("# UT design world model\n")
-    assert "Append-only" in content
-    # A single iteration leaves no distill (the author had nothing to close
-    # the loop on), but the digest for the next author exists and is raw.
     assert summary["world_model_distills"] == 0
     digest = read_json(store.memory_root / "last_iteration.json")
     assert digest["decision"] == "promote"
+    assert digest["target_capability"] == "behavior-repair"
     assert digest["search_delta"] > 0
     assert digest["task_flips"] and digest["task_flips"][0]["flipped"] is True
     assert digest["mismatch"] is False
-    assert not (config.loop.run_dir / "calibration").exists()
+    assert digest["battery_deltas"]["behavior-repair"]["delta"] == 1.0
 
 
 class FlipBenchmark(FakeBenchmark):
@@ -620,7 +657,7 @@ def test_author_distill_is_committed_back_to_the_world_model(
         # iter1 archives (flat search), iter2 promotes: iter2's author reads
         # iter1's digest and appends its distill to the world model.
         benchmark=FlipBenchmark(tmp_path, natural_gain=False),
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     store = RunStore(config.loop.run_dir)
@@ -630,10 +667,12 @@ def test_author_distill_is_committed_back_to_the_world_model(
     assert summary["world_model_distills"] == 1
     events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
     assert '"world_model_updated"' in events
+    # Both candidates earned calibration rows.
+    assert summary["calibration_rows"] == 2
 
 
-class SilentAuthor(TestAuthor):
-    """Authors valid packets but never writes its distill."""
+class SilentAuthor(BatteryAuthorAgent):
+    """Authors valid battery updates but never writes its distill."""
 
     def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
         world_model = workspace / "ut_design_world_model.md"
@@ -641,7 +680,6 @@ class SilentAuthor(TestAuthor):
             role=role, prompt=prompt, workspace=workspace, log_dir=log_dir
         )
         if world_model.is_file():
-            # Undo whatever the base fake appended: this author stays silent.
             text = world_model.read_text(encoding="utf-8")
             head = text.split("\n## iter_")[0]
             world_model.write_text(head, encoding="utf-8")
@@ -662,7 +700,6 @@ def test_skipped_distill_is_recorded_not_papered_over(tmp_path: Path) -> None:
     content = RunStore(config.loop.run_dir).ut_world_model_path.read_text(
         encoding="utf-8"
     )
-    # No fallback template text was injected on the author's behalf.
     assert "## iter_0" not in content
 
 
@@ -672,7 +709,7 @@ def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> 
     OptimizationLoop(
         config,
         benchmark=first,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     store = RunStore(config.loop.run_dir)
@@ -686,7 +723,7 @@ def test_resume_reuses_frozen_decision_without_re_evaluation(tmp_path: Path) -> 
     summary = OptimizationLoop(
         config,
         benchmark=first,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     assert summary["incumbent_id"] == "iter001_candidate"
@@ -702,7 +739,7 @@ def test_raw_traceunit_records_archive_ids_without_persisting_records(
     summary = OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=False),
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
 
     assert summary["protocol"] == "c1_raw_traceunit"
@@ -713,10 +750,12 @@ def test_raw_traceunit_records_archive_ids_without_persisting_records(
     candidate = config.loop.run_dir / "candidates/iter001_candidate"
     assert not (candidate / "archives.json").exists()
     assert not (candidate / "ut_design_world_model.md").exists()
+    # The battery itself exists in every packet-generating condition.
+    assert (config.loop.run_dir / "battery/manifest.json").is_file()
 
 
 class LearningEditor:
-    """Fails the contract on attempt 1, then fixes it after reading feedback."""
+    """Fails the battery on attempt 1, then fixes it after reading feedback."""
 
     def __init__(self) -> None:
         self.attempts = 0
@@ -732,30 +771,24 @@ class LearningEditor:
         else:
             assert "continuing your own previous attempt" in prompt
             feedback = read_json(workspace / "unit_feedback.json")
-            self.saw_feedback = bool(feedback["failed_cases"])
-            assert feedback["contract_passed"] is False
-            public = [
-                case
-                for case in feedback["failed_cases"]
-                if case["tier"] == "public"
+            self.saw_feedback = bool(feedback["target_instances"])
+            assert feedback["target_improved"] is False
+            assert feedback["target_capability"] == "behavior-repair"
+            failing = [
+                item
+                for item in feedback["target_instances"]
+                if not item["candidate_passed"]
             ]
-            assert public and "stderr_tail" in public[0]
-            hidden = [
-                case
-                for case in feedback["failed_cases"]
-                if case["tier"] != "public"
-            ]
-            assert all("stdout_tail" not in case for case in hidden)
+            assert failing and failing[0]["description"]
+            assert feedback["damaged_capabilities"] == {}
             (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
         write_json(
             workspace / "proposal.json",
             {
                 "candidate_id": workspace.name,
                 "parent_id": "baseline",
-                "hypothesis_id": "h1",
-                "intervention_kind": "local_repair",
                 "mechanism_claim": "change behavior from bad to good",
-                "predicted_effect": "unit and search score improve",
+                "predicted_effect": "battery and search improve",
                 "regression_risks": [],
             },
         )
@@ -769,7 +802,7 @@ def test_inner_unit_loop_feeds_failures_back_before_search(tmp_path: Path) -> No
     summary = OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": editor},
+        agents={"test_author": BatteryAuthorAgent(), "search": editor},
     ).run()
 
     assert summary["incumbent_id"] == "iter001_candidate"
@@ -780,7 +813,7 @@ def test_inner_unit_loop_feeds_failures_back_before_search(tmp_path: Path) -> No
     assert benchmark.calls == ["search", "search"]
     evidence = read_json(config.loop.run_dir / "iterations/iter_001/evidence.json")
     assert evidence["metadata"]["unit_attempts"] == 2
-    assert evidence["contract_passed"] is True
+    assert evidence["target_improved"] is True
 
 
 def test_exhausted_inner_loop_still_reaches_search(tmp_path: Path) -> None:
@@ -794,11 +827,9 @@ def test_exhausted_inner_loop_still_reaches_search(tmp_path: Path) -> None:
     OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": BadEditor()},
+        agents={"test_author": BatteryAuthorAgent(), "search": BadEditor()},
     ).run()
 
-    # Retries exhausted (initial + 1 retry) and the paired search evaluation
-    # still ran: every mechanically valid candidate earns search evidence.
     assert benchmark.calls == ["search", "search"]
     decision = read_json(config.loop.run_dir / "iterations/iter_001/decision.json")
     assert decision["decision"] == "reject"
@@ -806,24 +837,26 @@ def test_exhausted_inner_loop_still_reaches_search(tmp_path: Path) -> None:
     assert decision["evidence"]["search_delta"] is not None
 
 
-def test_proposer_sees_traces_score_and_world_model(tmp_path: Path) -> None:
+def test_proposer_sees_target_traces_score_and_world_model(tmp_path: Path) -> None:
     config = _config(tmp_path, ExperimentCondition.FULL)
     editor = SearchAgent()
     OptimizationLoop(
         config,
         benchmark=FakeBenchmark(tmp_path, natural_gain=True),
-        agents={"test_author": TestAuthor(), "search": editor},
+        agents={"test_author": BatteryAuthorAgent(), "search": editor},
     ).run()
 
     prompt = editor.prompts[0]
+    assert "target capability" in prompt
     assert "failing search traces of the incumbent" in prompt
     assert "current aggregate search score" in prompt
     assert "UT-design world model" in prompt
     candidate = config.loop.run_dir / "candidates/iter001_candidate"
     assert (candidate / "trace_evidence/manifest.json").is_file()
     assert (candidate / "ut_design_world_model.md").is_file()
-    staged = read_json(candidate / "trace_evidence/manifest.json")
-    assert staged["traces"], "the incumbent's failing traces are staged"
+    target = read_json(candidate / "target_capability.json")
+    assert target["target_capability"] == "behavior-repair"
+    assert target["instances"] and target["instances"][0]["description"]
 
 
 class FailingAuthor:
@@ -853,19 +886,16 @@ def test_consecutive_agent_failures_halt_and_hand_back_iterations(
     ).run()
 
     assert summary["status"] == "halted"
-    # Three skipped iterations were handed back: the run resumes at iter 1.
     state = read_json(config.loop.run_dir / "run_state.json")
     assert state["next_iteration"] == 1
     events = (config.loop.run_dir / "events.jsonl").read_text(encoding="utf-8")
     assert '"run_halted_after_consecutive_skips"' in events
-    # Only the baseline touched the search pool.
     assert benchmark.calls == ["search"]
 
-    # Resuming with a healthy author picks the budget back up.
     resumed = OptimizationLoop(
         config,
         benchmark=benchmark,
-        agents={"test_author": TestAuthor(), "search": SearchAgent()},
+        agents={"test_author": BatteryAuthorAgent(), "search": SearchAgent()},
     ).run()
     assert resumed["status"] in {"completed", "converged"}
     assert resumed["incumbent_id"] == "iter001_candidate"

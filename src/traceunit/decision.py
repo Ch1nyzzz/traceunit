@@ -8,19 +8,18 @@ ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED = "search_improved_unit_failed"
 
 
 def unit_ok(evidence: EvidenceRecord, config: DecisionConfig) -> bool:
-    """The complete unit verdict: frozen contract, preserved contracts, regressions."""
+    """The complete unit verdict from the capability battery: the diagnosed
+    capability improved and no other capability was damaged."""
 
-    return (
-        evidence.contract_passed
-        and evidence.preservation_passed
-        and evidence.regression_loss <= config.max_regression_loss
-    )
+    del config  # collateral tolerance is applied when the evidence is built
+    return evidence.target_improved and evidence.collateral_ok
 
 
 def is_mismatch(evidence: EvidenceRecord, config: DecisionConfig) -> bool:
-    """Unit verdict and paired search disagree: the UT design missed the search
-    distribution (unit passed, search regressed) or missed the mechanism (search
-    improved, unit failed). Either way the next Test Author must diagnose it."""
+    """Battery verdict and paired search disagree: the battery deviates from
+    the search distribution (unit passed, search regressed) or missed the
+    mechanism (search improved, unit failed). Either way the next Test Author
+    must diagnose it before designing new instances."""
 
     if evidence.search_delta is None:
         return False
@@ -45,16 +44,16 @@ def archive_kind(evidence: EvidenceRecord, config: DecisionConfig) -> str | None
 
 
 class DecisionPolicy:
-    """The five-cell decision table over the unit verdict and paired search.
+    """The five-cell decision table over the battery verdict and paired search.
 
     | unit \\ search | improved | flat        | regressed          |
     | passed         | promote  | archive     | reject (mismatch)  |
     | failed         | archive (mismatch) | reject | reject        |
 
-    The unit contract is a cheap alignment check that the patch repaired the
-    trace-diagnosed atomic problem; paired search is the real objective. When
-    the two disagree, the candidate earns no promotion, but the disagreement
-    itself is staged for the next Test Author to diagnose.
+    The capability battery is a cheap proxy for the benchmark's capability
+    requirements; paired search is the real objective. When the two disagree,
+    the candidate earns no promotion, but the disagreement itself is staged
+    for the next Test Author to diagnose and calibrate against.
     """
 
     def __init__(self, config: DecisionConfig) -> None:
@@ -75,30 +74,33 @@ class DecisionPolicy:
                 return self._record(
                     evidence,
                     Decision.PROMOTE,
-                    "the unit contract passed and paired search improved",
+                    "the target capability improved on the battery and paired "
+                    "search improved",
                     min(1.0, 0.5 + delta),
                 )
             if delta >= -cfg.noninferiority_margin:
                 return self._record(
                     evidence,
                     Decision.ARCHIVE,
-                    "the unit contract passed and paired search was noninferior; "
-                    "kept as a record for later re-litigation",
+                    "the target capability improved on the battery while paired "
+                    "search was noninferior; kept as a record for later "
+                    "re-litigation",
                     0.5,
                 )
             return self._record(
                 evidence,
                 Decision.REJECT,
-                "the unit contract passed but paired search regressed: the UT "
-                "design deviated from the search distribution",
+                "the battery certified the edit but paired search regressed: "
+                "the battery deviates from the search distribution",
                 max(0.0, 1.0 + delta),
             )
         if delta > cfg.min_search_delta:
             return self._record(
                 evidence,
                 Decision.ARCHIVE,
-                "paired search improved but the unit contract failed: the patch "
-                "is kept as a record and the UT design needs diagnosis",
+                "paired search improved but the battery did not certify the "
+                "edit: the patch is kept as a record and the battery needs "
+                "diagnosis",
                 0.5,
             )
         return self._record(
@@ -108,16 +110,14 @@ class DecisionPolicy:
             0.0,
         )
 
-    def _reject_reason(self, evidence: EvidenceRecord) -> str:
-        if not evidence.contract_passed:
-            return "neither the unit contract nor paired search improved"
-        if not evidence.preservation_passed:
+    @staticmethod
+    def _reject_reason(evidence: EvidenceRecord) -> str:
+        if not evidence.target_improved:
             return (
-                "the candidate broke a preserved contract and paired search "
-                "did not improve"
+                "neither the target capability nor paired search improved"
             )
         return (
-            "the candidate broke an incumbent-passing regression and paired "
+            "the edit damaged other capabilities on the battery and paired "
             "search did not improve"
         )
 

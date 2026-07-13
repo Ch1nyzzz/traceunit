@@ -17,7 +17,7 @@ class RunStore:
         self.ontology_path = self.root / "protocol" / "l0_ontology.json"
         self.memory_root = self.root / "ut_memory"
         self.ut_world_model_path = self.memory_root / "world_model.md"
-        self.packet_store_root = self.root / "frozen_packets"
+        self.battery_root = self.root / "battery"
         self.archive_root = self.root / "archive"
         self.mismatch_root = self.root / "mismatch"
         self.sealed_root = self.root / "sealed"
@@ -38,7 +38,7 @@ class RunStore:
         ]
         enabled = dict(capabilities or {})
         if enabled.get("generated_packets", True):
-            names.extend(["test_library", "frozen_packets"])
+            names.append("battery")
         if enabled.get("online_ut_memory", True):
             names.append("ut_memory")
         for name in names:

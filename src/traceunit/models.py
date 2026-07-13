@@ -404,10 +404,10 @@ class BenchmarkEvaluation:
 class CandidateProposal:
     candidate_id: str
     parent_id: str
-    hypothesis_id: str
-    intervention_kind: InterventionKind
     mechanism_claim: str
     predicted_effect: str
+    hypothesis_id: str = ""
+    intervention_kind: InterventionKind = InterventionKind.LOCAL_REPAIR
     regression_risks: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -419,7 +419,7 @@ class CandidateProposal:
         return cls(
             candidate_id=str(value["candidate_id"]),
             parent_id=str(value["parent_id"]),
-            hypothesis_id=str(value["hypothesis_id"]),
+            hypothesis_id=str(value.get("hypothesis_id") or ""),
             intervention_kind=InterventionKind(
                 str(value.get("intervention_kind") or InterventionKind.LOCAL_REPAIR)
             ),
@@ -486,19 +486,19 @@ class ScoreOnlyDecisionRecord:
 
 @dataclass(frozen=True)
 class EvidenceRecord:
+    """The unit half is the capability battery: did the diagnosed capability's
+    pass rate improve, and did every other capability stay intact."""
+
     iteration: int
     candidate_id: str
-    packet_id: str
-    public_gain: float
-    hidden_gain: float
-    bridge_gain: float
-    regression_loss: float
-    contract_passed: bool
-    bridge_contract_passed: bool
+    target_capability: str
+    target_improved: bool
+    collateral_ok: bool
+    target_delta: float = 0.0
+    collateral_delta: float = 0.0
     primary_family: UnitFamily | None = None
     intervention_kind: InterventionKind = InterventionKind.LOCAL_REPAIR
     search_delta: float | None = None
-    preservation_passed: bool = True
     total_cost: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -515,13 +515,11 @@ class EvidenceRecord:
         return cls(
             iteration=int(value["iteration"]),
             candidate_id=str(value["candidate_id"]),
-            packet_id=str(value["packet_id"]),
-            public_gain=float(value.get("public_gain") or 0.0),
-            hidden_gain=float(value.get("hidden_gain") or 0.0),
-            bridge_gain=float(value.get("bridge_gain") or 0.0),
-            regression_loss=float(value.get("regression_loss") or 0.0),
-            contract_passed=bool(value.get("contract_passed", False)),
-            bridge_contract_passed=bool(value.get("bridge_contract_passed", False)),
+            target_capability=str(value.get("target_capability") or ""),
+            target_improved=bool(value.get("target_improved", False)),
+            collateral_ok=bool(value.get("collateral_ok", False)),
+            target_delta=float(value.get("target_delta") or 0.0),
+            collateral_delta=float(value.get("collateral_delta") or 0.0),
             primary_family=(
                 None
                 if value.get("primary_family") in (None, "")
@@ -535,7 +533,6 @@ class EvidenceRecord:
                 if value.get("search_delta") is None
                 else float(value["search_delta"])
             ),
-            preservation_passed=bool(value.get("preservation_passed", True)),
             total_cost=float(value.get("total_cost") or 0.0),
             metadata=dict(value.get("metadata") or {}),
         )
@@ -579,7 +576,6 @@ class RunState:
     condition: str = "c3_full"
     capabilities: dict[str, bool] = field(default_factory=dict)
     promoted_ids: list[str] = field(default_factory=list)
-    preserved_packet_refs: list[dict[str, str]] = field(default_factory=list)
     # Archived candidates are records, not protocol capabilities: an edit whose
     # contract passed while search stayed flat, or whose search improved while
     # its contract failed. Later agents read the records and may re-litigate
@@ -609,10 +605,6 @@ class RunState:
                 for key, item in dict(value.get("capabilities") or {}).items()
             },
             promoted_ids=[str(x) for x in value.get("promoted_ids") or []],
-            preserved_packet_refs=[
-                {str(key): str(item) for key, item in dict(ref).items()}
-                for ref in value.get("preserved_packet_refs") or []
-            ],
             archived_ids=[str(x) for x in value.get("archived_ids") or []],
             archive_refs=[
                 {str(key): str(item) for key, item in dict(ref).items()}

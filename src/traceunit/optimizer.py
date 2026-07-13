@@ -5,13 +5,13 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping
 from traceunit.agents.runner import WorkspaceAgent, build_agent
+from traceunit.battery import Battery, CalibrationLedger
 from traceunit.benchmarks import BenchmarkAdapter, build_benchmark
 from traceunit.candidate import CandidateBuildError, CandidateBuilder
 from traceunit.config import ProjectConfig
 from traceunit.decision import DecisionPolicy, archive_kind, is_mismatch, unit_ok
 from traceunit.evaluation import CandidateEvaluator
 from traceunit.io import copy_source, read_json, write_json
-from traceunit.replay import FrozenPacketRef, copy_packet_into_store
 from traceunit.models import (
     BenchmarkPlan,
     CandidateProposal,
@@ -19,10 +19,9 @@ from traceunit.models import (
     DecisionRecord,
     EvidenceRecord,
     RunState,
-    TestPacket,
 )
 from traceunit.ontology import freeze_ontology, ontology_ref
-from traceunit.packets import PacketAuthor, TestDesignFailure
+from traceunit.packets import BatteryAuthor, TestDesignFailure
 from traceunit.score_only import ScoreOnlyCandidateBuilder, ScoreOnlyEvaluator
 from traceunit.store import RunStore
 from traceunit.ut_memory import WorldModel
@@ -76,20 +75,14 @@ class OptimizationLoop:
         self.search_agent = supplied.get("search") or build_agent(
             _with_target_env(config.agents.search)
         )
-        self.regression_author_agent = (
-            supplied.get("regression_author")
-            or (
-                build_agent(_with_target_env(config.agents.regression_author))
-                if config.agents.regression_author.enabled
-                else None
-            )
-            if config.capabilities.generated_packets
-            else None
-        )
         self.policy = DecisionPolicy(config.decision)
         self.world_model = WorldModel(self.store.ut_world_model_path)
+        self.battery = Battery(self.store.battery_root)
+        self.calibration = CalibrationLedger(
+            self.store.battery_root / "calibration.jsonl"
+        )
         self.benchmark_plan: BenchmarkPlan | None = None
-        self.packet_author: PacketAuthor | None = None
+        self.battery_author: BatteryAuthor | None = None
         self.candidate_builder: CandidateBuilder | None = None
         self.evaluator: CandidateEvaluator | None = None
         self.score_only_builder: ScoreOnlyCandidateBuilder | None = None
@@ -199,11 +192,13 @@ class OptimizationLoop:
             )
             return
         assert self.test_author_agent is not None
-        self.packet_author = PacketAuthor(
+        self.battery_author = BatteryAuthor(
             config=self.config,
             store=self.store,
             benchmark=self.benchmark,
             agent=self.test_author_agent,
+            battery=self.battery,
+            calibration=self.calibration,
             world_model=(
                 self.world_model
                 if self.config.capabilities.online_ut_memory
@@ -215,6 +210,7 @@ class OptimizationLoop:
             store=self.store,
             benchmark=self.benchmark,
             search_agent=self.search_agent,
+            battery=self.battery,
             world_model=(
                 self.world_model
                 if self.config.capabilities.online_ut_memory
@@ -227,14 +223,12 @@ class OptimizationLoop:
             benchmark=self.benchmark,
             benchmark_plan=plan,
             policy=self.policy,
-            regression_author=self.regression_author_agent,
         )
 
     def _preflight_agents(self) -> None:
         for agent in (
             self.test_author_agent,
             self.search_agent,
-            self.regression_author_agent,
         ):
             preflight = getattr(agent, "preflight", None)
             if callable(preflight):
@@ -277,7 +271,7 @@ class OptimizationLoop:
     def _run_iteration(self, state: RunState, iteration: int) -> RunState:
         if not self.config.capabilities.generated_packets:
             return self._run_score_only_iteration(state, iteration)
-        assert self.packet_author is not None
+        assert self.battery_author is not None
         assert self.candidate_builder is not None
         assert self.evaluator is not None
         iteration_dir = self.store.iteration_dir(iteration)
@@ -294,7 +288,7 @@ class OptimizationLoop:
                 "incumbent": state.incumbent_id,
             },
         )
-        packet, packet_path = self.packet_author.get_or_author(
+        target_capability, target_family = self.battery_author.get_or_update(
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
@@ -303,8 +297,8 @@ class OptimizationLoop:
             state=state,
             iteration=iteration,
             iteration_dir=iteration_dir,
-            packet=packet,
-            packet_path=packet_path,
+            target_capability=target_capability,
+            target_family=target_family,
         )
         write_json(iteration_dir / "candidate_proposal.json", proposal.to_dict())
         (iteration_dir / "candidate.diff").write_text(diff_text, encoding="utf-8")
@@ -313,8 +307,8 @@ class OptimizationLoop:
             iteration=iteration,
             iteration_dir=iteration_dir,
             proposal=proposal,
-            packet=packet,
-            packet_path=packet_path,
+            target_capability=target_capability,
+            target_family=target_family,
             candidate_source=candidate_source,
             diff_text=diff_text,
             unit=unit,
@@ -327,8 +321,6 @@ class OptimizationLoop:
             state=state,
             iteration=iteration,
             proposal=proposal,
-            packet=packet,
-            packet_path=packet_path,
             candidate_source=candidate_source,
             evidence=evidence,
             decision=decision,
@@ -344,7 +336,6 @@ class OptimizationLoop:
             iteration=iteration,
             iteration_dir=iteration_dir,
             proposal=proposal,
-            packet=packet,
             decision=decision,
         )
 
@@ -357,12 +348,10 @@ class OptimizationLoop:
     ) -> RunState:
         """Commit an existing decision artifact without recomputing evidence."""
 
-        assert self.packet_author is not None
         decision_path = iteration_dir / "decision.json"
         evidence_path = iteration_dir / "evidence.json"
         proposal_path = iteration_dir / "candidate_proposal.json"
-        packet_ref_path = iteration_dir / "packet_ref.json"
-        required = (decision_path, evidence_path, proposal_path, packet_ref_path)
+        required = (decision_path, evidence_path, proposal_path)
         missing = [str(path) for path in required if not path.is_file()]
         if missing:
             raise RuntimeError(
@@ -374,8 +363,6 @@ class OptimizationLoop:
         if decision.evidence.to_dict() != evidence.to_dict():
             raise RuntimeError("decision evidence does not match evidence.json")
         proposal = CandidateProposal.from_dict(read_json(proposal_path))
-        packet_path = Path(str(read_json(packet_ref_path)["path"]))
-        packet = self.packet_author.verified(packet_path)
         candidate_source = Path(
             str(
                 evidence.metadata.get(
@@ -390,8 +377,6 @@ class OptimizationLoop:
             state=state,
             iteration=iteration,
             proposal=proposal,
-            packet=packet,
-            packet_path=packet_path,
             candidate_source=candidate_source,
             evidence=evidence,
             decision=decision,
@@ -412,7 +397,6 @@ class OptimizationLoop:
             iteration=iteration,
             iteration_dir=iteration_dir,
             proposal=proposal,
-            packet=packet,
             decision=decision,
         )
 
@@ -443,14 +427,14 @@ class OptimizationLoop:
                 "decision": decision.decision.value,
                 "reason": decision.reason,
                 "mechanism_claim": proposal.mechanism_claim,
-                "packet_id": evidence.packet_id,
+                "target_capability": evidence.target_capability,
                 "search_delta": evidence.search_delta,
-                "contract_passed": evidence.contract_passed,
-                "preservation_passed": evidence.preservation_passed,
+                "target_improved": evidence.target_improved,
+                "collateral_ok": evidence.collateral_ok,
+                "target_delta": evidence.target_delta,
+                "collateral_delta": evidence.collateral_delta,
+                "battery_deltas": evidence.metadata.get("battery_deltas"),
                 "unit_attempts": evidence.metadata.get("unit_attempts"),
-                "unit_failure_reasons": list(
-                    evidence.metadata.get("candidate_contract_reasons") or []
-                ),
                 "task_flips": self._task_flips(
                     parent_id=str(evidence.metadata.get("parent_id") or ""),
                     candidate_id=proposal.candidate_id,
@@ -469,7 +453,6 @@ class OptimizationLoop:
         iteration: int,
         iteration_dir: Path,
         proposal: CandidateProposal,
-        packet: TestPacket,
         decision: DecisionRecord,
     ) -> RunState:
         state.next_iteration = iteration + 1
@@ -489,7 +472,7 @@ class OptimizationLoop:
             "iteration_completed",
             iteration=iteration,
             candidate_id=proposal.candidate_id,
-            packet_id=packet.packet_id,
+            target_capability=decision.evidence.target_capability,
             decision=decision.decision.value,
             reason=decision.reason,
         )
@@ -567,8 +550,6 @@ class OptimizationLoop:
         state: RunState,
         iteration: int,
         proposal: CandidateProposal,
-        packet: TestPacket,
-        packet_path: Path,
         candidate_source: Path,
         evidence: EvidenceRecord,
         decision: DecisionRecord,
@@ -586,9 +567,18 @@ class OptimizationLoop:
             state.incumbent_search_score = float(search["candidate_score"])
             if proposal.candidate_id not in state.promoted_ids:
                 state.promoted_ids.append(proposal.candidate_id)
-            ref = self._store_packet(packet, packet_path)
-            if ref.to_dict() not in state.preserved_packet_refs:
-                state.preserved_packet_refs.append(ref.to_dict())
+            # The promoted candidate's full-battery results become the new
+            # incumbent reference the next candidates are paired against.
+            instance_results = dict(
+                evidence.metadata.get("battery_instance_results") or {}
+            )
+            if instance_results:
+                self.battery.update_reference(
+                    {
+                        str(key): bool(value)
+                        for key, value in instance_results.items()
+                    }
+                )
         elif decision.decision is Decision.ARCHIVE:
             self._retain_archive(
                 state=state,
@@ -601,10 +591,20 @@ class OptimizationLoop:
             self._stage_mismatch(
                 iteration=iteration,
                 proposal=proposal,
-                packet=packet,
-                packet_path=packet_path,
                 evidence=evidence,
                 decision=decision,
+            )
+        if evidence.search_delta is not None:
+            self.calibration.append(
+                iteration=iteration,
+                candidate_id=proposal.candidate_id,
+                target_capability=evidence.target_capability,
+                deltas=dict(evidence.metadata.get("battery_deltas") or {}),
+                instance_results=dict(
+                    evidence.metadata.get("battery_instance_results") or {}
+                ),
+                search_delta=evidence.search_delta,
+                decision=decision.decision.value,
             )
         state.committed_iterations.append(iteration)
         self.store.save_state(state)
@@ -648,17 +648,17 @@ class OptimizationLoop:
                 "kind": archive_kind(evidence, self.config.decision),
                 "reason": decision.reason,
                 "search_delta": evidence.search_delta,
-                "contract_passed": evidence.contract_passed,
-                "preservation_passed": evidence.preservation_passed,
-                "packet_id": evidence.packet_id,
+                "target_capability": evidence.target_capability,
+                "target_improved": evidence.target_improved,
+                "collateral_ok": evidence.collateral_ok,
+                "target_delta": evidence.target_delta,
+                "collateral_delta": evidence.collateral_delta,
                 "primary_family": (
                     evidence.primary_family.value if evidence.primary_family else ""
                 ),
                 "mechanism_claim": proposal.mechanism_claim,
                 "predicted_effect": proposal.predicted_effect,
-                "unit_failure_reasons": list(
-                    evidence.metadata.get("candidate_contract_reasons") or []
-                ),
+                "battery_deltas": evidence.metadata.get("battery_deltas"),
             },
         )
         state.archive_refs.append(
@@ -677,18 +677,16 @@ class OptimizationLoop:
         *,
         iteration: int,
         proposal: CandidateProposal,
-        packet: TestPacket,
-        packet_path: Path,
         evidence: EvidenceRecord,
         decision: DecisionRecord,
     ) -> None:
-        """Record a unit/search disagreement for the next Test Author to diagnose.
+        """Record a battery/search disagreement for the next Test Author.
 
-        Cell 3 (unit passed, search regressed) means the UT design deviated
-        from the search distribution; cell 4 (search improved, unit failed)
-        means the UT design missed the mechanism. The next Test Author reads
-        this record, the frozen tests, and both search traces, then distills
-        why into the world model before designing its next packet.
+        Cell 3 (battery passed, search regressed) means the battery deviates
+        from the search distribution; cell 4 (search improved, battery failed)
+        means the battery missed the mechanism. The next Test Author reads
+        this record, the battery results, and both sides' traces, then
+        distills why into the world model before updating the battery.
         """
 
         mismatch_dir = self.store.mismatch_root / f"iter_{iteration:03d}"
@@ -696,9 +694,6 @@ class OptimizationLoop:
         diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
         if diff_path.is_file():
             shutil.copy2(diff_path, mismatch_dir / "candidate.diff")
-        packet_copy = mismatch_dir / "packet"
-        if packet_path.is_dir() and not packet_copy.exists():
-            shutil.copytree(packet_path, packet_copy)
         kind = (
             "search_improved_unit_failed"
             if not unit_ok(evidence, self.config.decision)
@@ -713,14 +708,14 @@ class OptimizationLoop:
                 "reason": decision.reason,
                 "decision": decision.decision.value,
                 "search_delta": evidence.search_delta,
-                "packet_id": packet.packet_id,
-                "packet_path": str(packet_path),
-                "mechanism_claim": proposal.mechanism_claim,
-                "contract_passed": evidence.contract_passed,
-                "preservation_passed": evidence.preservation_passed,
-                "unit_failure_reasons": list(
-                    evidence.metadata.get("candidate_contract_reasons") or []
+                "target_capability": evidence.target_capability,
+                "target_improved": evidence.target_improved,
+                "collateral_ok": evidence.collateral_ok,
+                "battery_deltas": evidence.metadata.get("battery_deltas"),
+                "battery_instance_results": evidence.metadata.get(
+                    "battery_instance_results"
                 ),
+                "mechanism_claim": proposal.mechanism_claim,
                 "task_flips": self._task_flips(
                     parent_id=str(evidence.metadata.get("parent_id") or ""),
                     candidate_id=proposal.candidate_id,
@@ -769,18 +764,6 @@ class OptimizationLoop:
                 }
             )
         return flips
-
-    def _store_packet(self, packet: TestPacket, packet_path: Path) -> FrozenPacketRef:
-        relative = copy_packet_into_store(
-            packet_root=self.store.packet_store_root,
-            packet_bundle=packet_path,
-            content_sha256=packet.content_sha256,
-        )
-        return FrozenPacketRef(
-            packet_id=packet.packet_id,
-            path=relative,
-            content_sha256=packet.content_sha256,
-        )
 
     def _skip_failed_test_design(
         self, state: RunState, iteration: int, exc: Exception
@@ -848,9 +831,18 @@ class OptimizationLoop:
             "incumbent_id": state.incumbent_id,
             "incumbent_search_score": state.incumbent_search_score,
             "promoted_ids": state.promoted_ids,
-            "preserved_packets": list(state.preserved_packet_refs),
             "archived_ids": state.archived_ids,
             "archive_refs": list(state.archive_refs),
+            "battery": (
+                self.battery.state_summary()
+                if self.config.capabilities.generated_packets
+                else None
+            ),
+            "calibration_rows": (
+                self.calibration.summary()["rows"]
+                if self.calibration.path.is_file()
+                else 0
+            ),
             "world_model_distills": self.world_model.distill_count,
             "total_cost": state.total_cost,
             "search_cost": state.search_cost,

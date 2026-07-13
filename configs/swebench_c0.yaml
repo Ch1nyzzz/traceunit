@@ -36,7 +36,6 @@ agents:
     timeout_s: 3600
 
 decision:
-  max_regression_loss: 0.0
   min_search_delta: 0.0
   # One flipped task on a 50-task search pool is 0.02. With repeats=1 and a
   # nondeterministic model, a two-task paired swing is ordinary noise, so the
