@@ -95,6 +95,7 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             "content_sha256 must stay empty until the harness freezes the packet"
         )
     regression_only = packet.metadata.get("packet_kind") == "regression"
+    battery_instance = packet.metadata.get("packet_kind") == "battery_instance"
     hypothesis_ids = {item.hypothesis_id for item in packet.hypotheses}
     if not hypothesis_ids:
         raise InvalidTestPacket("at least one failure hypothesis is required")
@@ -109,7 +110,22 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             raise InvalidTestPacket(
                 f"{hypothesis.hypothesis_id}: confidence must be in [0, 1]"
             )
-    if not regression_only:
+    if battery_instance:
+        # A battery instance probes one atomic capability with a single case;
+        # it is one of several cross-domain variants, so the packet-level
+        # hypothesis structure (competing alternatives) does not apply.
+        if packet.primary_family is None:
+            raise InvalidTestPacket("battery instance requires primary_family")
+        target = next(
+            item
+            for item in packet.hypotheses
+            if item.hypothesis_id == packet.target_hypothesis_id
+        )
+        if target.family is not packet.primary_family:
+            raise InvalidTestPacket(
+                "battery instance hypothesis family must equal primary_family"
+            )
+    elif not regression_only:
         if len(hypothesis_ids) < 2:
             raise InvalidTestPacket(
                 "normal packet must contain at least two competing failure hypotheses"
@@ -207,7 +223,12 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             raise InvalidTestPacket(
                 f"non-public test must live under a hidden directory: {case.path}"
             )
-    if regression_only:
+    if battery_instance:
+        if len(packet.cases) != 1 or packet.cases[0].tier is not TestTier.PUBLIC:
+            raise InvalidTestPacket(
+                "battery instance must contain exactly one public case"
+            )
+    elif regression_only:
         invalid = tiers - {TestTier.REGRESSION, TestTier.ADMISSION}
         if invalid:
             raise InvalidTestPacket(
