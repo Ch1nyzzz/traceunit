@@ -74,12 +74,34 @@ def load_test_packet(bundle: Path) -> TestPacket:
     path = bundle / "test_packet.json"
     if not path.is_file():
         raise InvalidTestPacket(f"missing {path}")
+    raw = read_json(path)
+    _normalize_battery_instance(raw)
     try:
-        packet = TestPacket.from_dict(read_json(path))
+        packet = TestPacket.from_dict(raw)
     except Exception as exc:
         raise InvalidTestPacket(f"invalid test_packet.json: {exc}") from exc
     validate_test_packet(packet, bundle)
     return packet
+
+
+def _normalize_battery_instance(raw: object) -> None:
+    # A battery instance holds exactly one public case, and the tier rules fix
+    # a public case's evidence_role to target_reproducer - the field carries no
+    # information here, so the host fills it rather than rejecting a synonym.
+    if not isinstance(raw, dict):
+        return
+    metadata = raw.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("packet_kind") != "battery_instance"
+    ):
+        return
+    cases = raw.get("cases")
+    if not isinstance(cases, list):
+        return
+    for case in cases:
+        if isinstance(case, dict) and case.get("tier") == TestTier.PUBLIC.value:
+            case["evidence_role"] = EvidenceRole.TARGET_REPRODUCER.value
 
 
 def validate_test_packet(packet: TestPacket, bundle: Path) -> None:

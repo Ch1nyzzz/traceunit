@@ -25,6 +25,7 @@ def _instance_bundle(
     capability: str = "evidence-before-mutation",
     family: str = "verification",
     expected_text: str = "good",
+    evidence_role: str = "target_reproducer",
 ) -> tuple[Path, str]:
     """Build and freeze a deterministic single-case battery-instance bundle."""
 
@@ -61,7 +62,7 @@ def _instance_bundle(
                 {
                     "case_id": "probe",
                     "tier": "public",
-                    "evidence_role": "target_reproducer",
+                    "evidence_role": evidence_role,
                     "path": "tests/public/probe.py",
                     "driver": "python",
                     "expected_incumbent_pass": False,
@@ -116,6 +117,14 @@ def test_battery_instance_validation_accepts_single_public_case(
     packet = load_test_packet(bundle)
     assert packet.metadata["packet_kind"] == "battery_instance"
     assert sha
+
+
+def test_battery_instance_load_normalizes_evidence_role(tmp_path: Path) -> None:
+    bundle, _ = _instance_bundle(
+        tmp_path, instance_id="probe-a", evidence_role="coverage_control"
+    )
+    packet = load_test_packet(bundle)
+    assert packet.cases[0].evidence_role.value == "target_reproducer"
 
 
 def test_battery_add_retire_and_reference(tmp_path: Path) -> None:

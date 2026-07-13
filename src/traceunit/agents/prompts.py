@@ -208,6 +208,8 @@ Hard rules for instances:
 - One instance = one frozen single-case packet bundle under
   {output_dir}/instances/<instance_id>/ with metadata.packet_kind="battery_instance",
   exactly one public case, and primary_family set to the capability's L0 family.
+  The public case always carries tier="public" and evidence_role="target_reproducer"
+  verbatim - these are fixed schema values, never invent alternatives.
 - Cross-domain: never reuse the search tasks' app names, API names, entities, or
   literal values. Re-skin the mechanism into a fictional domain or a structurally
   different real one. Sibling instances in a group must differ in surface, not in
