@@ -32,3 +32,15 @@ must not be described as completed paper evidence.
 - Pilot the frozen L0 registry and report direction coverage plus
   `other`/`uncertain` rates. Change the registry only between versioned
   cohorts.
+
+## P1 target selection should answer to calibration
+
+- v5 AppWorld: the author targeted `transaction-scope-isolation` six
+  consecutive iterations (5-10) while its calibration rows showed battery
+  movement never converting to search movement (three battery gains, zero
+  search gains). The staged direction-agreement table was ignored.
+- Prompt-level fix for the next run: when choosing target_capability, the
+  author must state why against the calibration table, and choosing a group
+  whose battery movement repeatedly failed to convert requires an explicit
+  new hypothesis for why the next attempt differs (still informative, never
+  a hard gate).
