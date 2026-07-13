@@ -694,6 +694,7 @@ class OptimizationLoop:
         diff_path = self.store.iteration_dir(iteration) / "candidate.diff"
         if diff_path.is_file():
             shutil.copy2(diff_path, mismatch_dir / "candidate.diff")
+        self._stage_probe_transcripts(iteration=iteration, mismatch_dir=mismatch_dir)
         kind = (
             "search_improved_unit_failed"
             if not unit_ok(evidence, self.config.decision)
@@ -728,6 +729,27 @@ class OptimizationLoop:
             candidate_id=proposal.candidate_id,
             kind=kind,
         )
+
+    def _stage_probe_transcripts(
+        self, *, iteration: int, mismatch_dir: Path
+    ) -> None:
+        """Copy the last inner attempt's battery execution outputs into the
+        mismatch record.
+
+        The transcripts show what the candidate actually replied against what
+        each expectation demanded - without them the diagnosing Test Author
+        only sees pass/fail booleans and cannot tell an unfair probe from a
+        genuine capability gap.
+        """
+
+        unit_loop = self.store.iteration_dir(iteration) / "unit_loop"
+        attempts = sorted(unit_loop.glob("attempt_*")) if unit_loop.is_dir() else []
+        if not attempts:
+            return
+        battery_out = attempts[-1] / "battery"
+        destination = mismatch_dir / "probe_transcripts"
+        if battery_out.is_dir() and not destination.exists():
+            shutil.copytree(battery_out, destination)
 
     def _task_flips(
         self, *, parent_id: str, candidate_id: str

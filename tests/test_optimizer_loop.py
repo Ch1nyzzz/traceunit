@@ -478,6 +478,9 @@ def test_confirmed_search_improvement_with_failed_battery_promotes(
     assert mismatch["decision"] == "promote"
     assert mismatch["target_capability"] == "behavior-repair"
     assert any(flip["flipped"] for flip in mismatch["task_flips"])
+    # The diagnosing author gets the execution transcripts, not just booleans.
+    transcripts = run / "mismatch/iter_001/probe_transcripts"
+    assert (transcripts / "behavior-repair-a/results.json").is_file()
     events = (run / "events.jsonl").read_text(encoding="utf-8")
     assert '"search_confirmation_run"' in events
     state = json.loads((run / "run_state.json").read_text())
@@ -717,6 +720,12 @@ def test_author_distill_is_committed_back_to_the_world_model(
     assert '"world_model_updated"' in events
     # Both candidates earned calibration rows.
     assert summary["calibration_rows"] == 2
+    # The second author received the frozen probe bundles to audit.
+    staged_instances = (
+        config.loop.run_dir
+        / "iterations/iter_002/test_author/attempt_1/workspace/battery_instances"
+    )
+    assert (staged_instances / "behavior-repair-a/test_packet.json").is_file()
 
 
 class SilentAuthor(BatteryAuthorAgent):

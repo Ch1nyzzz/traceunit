@@ -92,6 +92,7 @@ def battery_author_prompt(
     incumbent_source: Path,
     battery_state_path: Path | None,
     calibration_path: Path | None,
+    battery_instances_path: Path | None = None,
     cold_start: bool,
     max_instances_per_capability: int,
     output_dir: Path,
@@ -115,8 +116,11 @@ def battery_author_prompt(
     if mismatch_path is not None:
         memory_lines.append(
             f"- battery/search MISMATCH evidence from the previous iteration: "
-            f"{mismatch_path} (mismatch.json, the candidate diff, and the "
-            f"mismatch candidate's failed search traces under candidate_traces/)"
+            f"{mismatch_path} (mismatch.json, the candidate diff, the candidate's "
+            f"failed search traces under candidate_traces/, and the battery "
+            f"execution transcripts under probe_transcripts/ - each instance's "
+            f"staged messages, the candidate's actual reply, and every "
+            f"expectation's pass/fail)"
         )
     if battery_state_path is not None:
         memory_lines.append(
@@ -128,6 +132,15 @@ def battery_author_prompt(
             f"- host-computed calibration (which capabilities' battery movement "
             f"predicted search, which instances carry no information): "
             f"{calibration_path}"
+        )
+    if battery_instances_path is not None:
+        memory_lines.append(
+            f"- the frozen instance bundles, probe files included (read-only "
+            f"copies): {battery_instances_path}. You own these probes: audit "
+            f"their fairness before blaming a candidate - an expectation that "
+            f"demands a format the agent was never told, or a token budget "
+            f"tighter than honest behavior needs, fails correct candidates on "
+            f"the surface, not the mechanism."
         )
     memory_input = "\n".join(memory_lines)
     if world_model_path is not None:
@@ -147,8 +160,12 @@ def battery_author_prompt(
             distill_step += (
                 " The previous iteration was a MISMATCH: the battery verdict and "
                 "paired search disagreed. Diagnose it properly before designing: "
-                "read the failing instances, the candidate diff, and the failed "
-                "search traces, and name concretely what the battery measured "
+                "read the probe transcripts (what the candidate actually replied "
+                "against what each expectation demanded), the candidate diff, and "
+                "the failed search traces. FIRST rule out an unfair probe - a "
+                "behaviorally correct reply failed on format, spelling, or a "
+                "starved token budget - before concluding the candidate lacks "
+                "the capability; then name concretely what the battery measured "
                 "that the search tasks do not (or the reverse). Your update must "
                 "not repeat that gap. If the mismatch candidate was PROMOTED (its "
                 "search improvement held under an independent confirmation), the "

@@ -136,7 +136,14 @@ class BatteryAuthor:
         return staged
 
     def _stage_battery_inputs(self, workspace: Path) -> dict[str, Path | None]:
-        """Stage the battery state and the calibration table for the author."""
+        """Stage the battery state, the calibration table, and the frozen
+        instance bundles for the author.
+
+        The author owns the battery, so it gets the probe files themselves -
+        without them a predecessor's unfair expectation (an invented exact
+        format string, a starved token budget) is indistinguishable from a
+        genuine capability gap, and the mismatch channel cannot self-correct.
+        """
 
         workspace.mkdir(parents=True, exist_ok=True)
         state_path = workspace / "battery_state.json"
@@ -149,7 +156,16 @@ class BatteryAuthor:
                 calibration_path.write_text(
                     self.calibration.markdown(), encoding="utf-8"
                 )
-        return {"battery_state": state_path, "calibration": calibration_path}
+        instances_path: Path | None = None
+        if self.battery.instances_root.is_dir():
+            instances_path = workspace / "battery_instances"
+            if not instances_path.exists():
+                shutil.copytree(self.battery.instances_root, instances_path)
+        return {
+            "battery_state": state_path,
+            "calibration": calibration_path,
+            "instances": instances_path,
+        }
 
     def _commit_world_model(self, workspace: Path, *, iteration: int) -> None:
         """Copy the author's world-model file back; record whether it grew."""
@@ -200,6 +216,7 @@ class BatteryAuthor:
                 incumbent_source=incumbent_copy,
                 battery_state_path=battery_inputs["battery_state"],
                 calibration_path=battery_inputs["calibration"],
+                battery_instances_path=battery_inputs["instances"],
                 cold_start=not self.battery.active(),
                 max_instances_per_capability=(
                     self.config.loop.max_instances_per_capability
