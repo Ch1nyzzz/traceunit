@@ -93,6 +93,7 @@ def battery_author_prompt(
     battery_state_path: Path | None,
     calibration_path: Path | None,
     battery_instances_path: Path | None = None,
+    archives_path: Path | None = None,
     cold_start: bool,
     max_instances_per_capability: int,
     output_dir: Path,
@@ -141,6 +142,14 @@ def battery_author_prompt(
             f"demands a format the agent was never told, or a token budget "
             f"tighter than honest behavior needs, fails correct candidates on "
             f"the surface, not the mechanism."
+        )
+    if archives_path is not None:
+        memory_lines.append(
+            f"- archived candidate records (record.json plus each diff under "
+            f"archive/): {archives_path}. These edits moved paired search "
+            f"without battery certification (or passed the battery with flat "
+            f"search); the mechanisms in their diffs are what your instances "
+            f"should be sensitive to."
         )
     memory_input = "\n".join(memory_lines)
     if world_model_path is not None:
@@ -328,7 +337,10 @@ def candidate_edit_prompt(
         )
     if history_path is not None:
         input_lines.append(
-            f"- prior decisions and search deltas: {history_path}"
+            f"- every prior candidate's decision, reason, claimed mechanism, "
+            f"and diff (staged under history_diffs/): {history_path}. Read what "
+            f"was already tried and why it failed before proposing; do not "
+            f"re-propose a rejected mechanism unchanged."
         )
     if archives_path is not None:
         input_lines.append(

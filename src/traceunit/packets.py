@@ -22,6 +22,7 @@ from typing import Any
 
 from traceunit.agents.prompts import battery_author_prompt
 from traceunit.agents.runner import WorkspaceAgent
+from traceunit.candidate import stage_archive_records
 from traceunit.battery import (
     Battery,
     BatteryError,
@@ -135,6 +136,29 @@ class BatteryAuthor:
                 staged["mismatch"] = mismatch_dir
         return staged
 
+    def _stage_previous_attempt(
+        self, *, iteration_dir: Path, attempt: int, workspace: Path
+    ) -> None:
+        """Copy the rejected attempt's own output and the host's admission
+        transcripts into the retry workspace.
+
+        Without them the retrying author rebuilds blind: it cannot read its
+        own rejected update, and an admission failure ('declared pass=True,
+        measured False') is undiagnosable without the incumbent's actual
+        reply against each expectation.
+        """
+
+        previous = iteration_dir / "test_author" / f"attempt_{attempt - 1}"
+        workspace.mkdir(parents=True, exist_ok=True)
+        for source_name, target_name in (
+            ("workspace/output", "previous_output"),
+            ("admission", "previous_admission"),
+        ):
+            source = previous / source_name
+            target = workspace / target_name
+            if source.is_dir() and not target.exists():
+                shutil.copytree(source, target)
+
     def _stage_battery_inputs(self, workspace: Path) -> dict[str, Path | None]:
         """Stage the battery state, the calibration table, and the frozen
         instance bundles for the author.
@@ -196,6 +220,12 @@ class BatteryAuthor:
             workspace = (
                 iteration_dir / "test_author" / f"attempt_{attempt}" / "workspace"
             )
+            if attempt > 1:
+                self._stage_previous_attempt(
+                    iteration_dir=iteration_dir,
+                    attempt=attempt,
+                    workspace=workspace,
+                )
             output = workspace / "output"
             incumbent_copy = workspace / "incumbent_source"
             if not incumbent_copy.exists():
@@ -210,6 +240,14 @@ class BatteryAuthor:
                 )
             memory_inputs = self._stage_memory_inputs(workspace)
             battery_inputs = self._stage_battery_inputs(workspace)
+            archives_path: Path | None = None
+            if not (workspace / "archives.json").is_file():
+                archives = stage_archive_records(state, workspace)
+                if archives:
+                    archives_path = workspace / "archives.json"
+                    write_json(archives_path, {"archives": archives})
+            else:
+                archives_path = workspace / "archives.json"
             prompt = battery_author_prompt(
                 benchmark_context=self.benchmark.context(),
                 trace_manifest=trace_manifest,
@@ -217,6 +255,7 @@ class BatteryAuthor:
                 battery_state_path=battery_inputs["battery_state"],
                 calibration_path=battery_inputs["calibration"],
                 battery_instances_path=battery_inputs["instances"],
+                archives_path=archives_path,
                 cold_start=not self.battery.active(),
                 max_instances_per_capability=(
                     self.config.loop.max_instances_per_capability
@@ -234,6 +273,19 @@ class BatteryAuthor:
                     "\n\nThe previous battery update was rejected. Fix the causes "
                     "instead of weakening the instances:\n" + feedback
                 )
+                if (workspace / "previous_output").is_dir():
+                    prompt += (
+                        "\n\nYour previous attempt's files are under "
+                        "previous_output/ - edit and resubmit rather than "
+                        "rebuilding from scratch."
+                    )
+                if (workspace / "previous_admission").is_dir():
+                    prompt += (
+                        " The host's admission runs are under "
+                        "previous_admission/<instance_id>/ - each shows what "
+                        "the incumbent actually replied and which expectation "
+                        "or budget failed."
+                    )
             if not (output / "battery_update.json").is_file():
                 run = self.agent.run(
                     role="test_author",

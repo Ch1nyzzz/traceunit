@@ -86,7 +86,7 @@ class CandidateBuilder:
                 destination=trace_manifest.parent,
                 max_failure_traces=self.config.loop.max_failure_traces,
             )
-            write_json(history_path, self.public_history())
+            write_json(history_path, self.public_history(candidate_dir))
             archives = self.public_archives(state, candidate_dir)
             if archives:
                 write_json(candidate_dir / "archives.json", {"archives": archives})
@@ -279,66 +279,97 @@ class CandidateBuilder:
             )
         return proposal
 
-    def public_history(self) -> dict[str, Any]:
+    def public_history(self, workspace: Path | None = None) -> dict[str, Any]:
+        """Every prior candidate's decision, reason, claimed mechanism, and
+        (when a workspace is given) its staged diff.
+
+        A later editor that cannot see what was tried and why it failed
+        re-proposes the same dead mechanisms; there is no reason to withhold
+        any of it - the diffs contain only earlier editors' own work.
+        """
+
         decisions: list[dict[str, Any]] = []
         for path in sorted(
             (self.store.root / "iterations").glob("iter_*/decision.json")
         ):
             raw = read_json(path)
             evidence = dict(raw.get("evidence") or {})
-            decisions.append(
-                {
-                    "iteration": raw.get("iteration"),
-                    "candidate_id": raw.get("candidate_id"),
-                    "decision": raw.get("decision"),
-                    "aggregate_evidence": {
-                        key: evidence.get(key)
-                        for key in (
-                            "target_capability",
-                            "target_improved",
-                            "collateral_ok",
-                            "target_delta",
-                            "collateral_delta",
-                            "search_delta",
-                        )
-                        if key in evidence
-                    },
-                }
-            )
+            entry: dict[str, Any] = {
+                "iteration": raw.get("iteration"),
+                "candidate_id": raw.get("candidate_id"),
+                "decision": raw.get("decision"),
+                "reason": raw.get("reason"),
+                "aggregate_evidence": {
+                    key: evidence.get(key)
+                    for key in (
+                        "target_capability",
+                        "target_improved",
+                        "collateral_ok",
+                        "target_delta",
+                        "collateral_delta",
+                        "search_delta",
+                    )
+                    if key in evidence
+                },
+            }
+            proposal_path = path.parent / "candidate_proposal.json"
+            if proposal_path.is_file():
+                proposal = read_json(proposal_path)
+                entry["mechanism_claim"] = proposal.get("mechanism_claim")
+                entry["intervention_kind"] = proposal.get("intervention_kind")
+            diff_path = path.parent / "candidate.diff"
+            if workspace is not None and diff_path.is_file():
+                staged = (
+                    workspace
+                    / "history_diffs"
+                    / f"{path.parent.name}.diff"
+                )
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(diff_path, staged)
+                entry["diff_path"] = str(staged)
+            decisions.append(entry)
         return {"decisions": decisions}
 
     def public_archives(
         self, state: RunState, workspace: Path
     ) -> list[dict[str, Any]]:
-        """Stage archived-candidate records as reference material.
+        return stage_archive_records(state, workspace)
 
-        Each record is an earlier edit worth reading: its battery verdict
-        passed while search stayed flat, or its search improved while the
-        battery did not certify it. The proposer may rebuild what it judges
-        valuable; nothing is applied or replayed automatically.
-        """
 
-        archives: list[dict[str, Any]] = []
-        for raw_ref in state.archive_refs[-8:]:
-            archive_dir = Path(str(raw_ref.get("path") or ""))
-            record_path = archive_dir / "record.json"
-            diff_path = archive_dir / "candidate.diff"
-            if not record_path.is_file():
-                continue
-            record = read_json(record_path)
-            entry = dict(record)
-            if diff_path.is_file():
-                staged = (
-                    workspace
-                    / "archive"
-                    / str(record["candidate_id"])
-                    / "candidate.diff"
-                )
-                staged.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(diff_path, staged)
-                entry["diff_path"] = str(staged)
-            archives.append(entry)
-        return archives
+def stage_archive_records(
+    state: RunState, workspace: Path
+) -> list[dict[str, Any]]:
+    """Stage archived-candidate records as reference material.
+
+    Each record is an earlier edit worth reading: its battery verdict
+    passed while search stayed flat, or its search improved while the
+    battery did not certify it. Both the Candidate Editor (re-litigation)
+    and the Test Author (designing instances sensitive to the mechanisms
+    the battery missed) read them; nothing is applied or replayed
+    automatically.
+    """
+
+    archives: list[dict[str, Any]] = []
+    for raw_ref in state.archive_refs[-8:]:
+        archive_dir = Path(str(raw_ref.get("path") or ""))
+        record_path = archive_dir / "record.json"
+        diff_path = archive_dir / "candidate.diff"
+        if not record_path.is_file():
+            continue
+        record = read_json(record_path)
+        entry = dict(record)
+        if diff_path.is_file():
+            staged = (
+                workspace
+                / "archive"
+                / str(record["candidate_id"])
+                / "candidate.diff"
+            )
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(diff_path, staged)
+            entry["diff_path"] = str(staged)
+        archives.append(entry)
+    return archives
 
 
 def opaque_instance_codes(

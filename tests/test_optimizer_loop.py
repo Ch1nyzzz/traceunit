@@ -281,6 +281,54 @@ class BatteryAuthorAgent:
         return _agent_result(role, log_dir)
 
 
+class MisdeclaringAuthor(BatteryAuthorAgent):
+    """Declares a wrong incumbent expectation once, then reads the staged
+    admission transcript and its own previous output to fix it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.saw_retry_evidence = False
+
+    def run(self, *, role: str, prompt: str, workspace: Path, log_dir: Path):
+        first_try = not (workspace / "previous_output").is_dir()
+        result = super().run(
+            role=role, prompt=prompt, workspace=workspace, log_dir=log_dir
+        )
+        update_path = workspace / "output/battery_update.json"
+        update = read_json(update_path)
+        if first_try:
+            # baseline behavior is 'bad', so declaring pass=True is wrong.
+            for item in update["new_instances"]:
+                if item["instance_id"] == "behavior-repair-a":
+                    item["expected_incumbent_pass"] = True
+            write_json(update_path, update)
+        else:
+            self.saw_retry_evidence = (
+                "previous_output" in prompt
+                and "previous_admission" in prompt
+                and (workspace / "previous_output/battery_update.rejected_1.json").is_file()
+                and (
+                    workspace / "previous_admission/behavior-repair-a/results.json"
+                ).is_file()
+            )
+        return result
+
+
+def test_rejected_author_sees_its_own_output_and_admission_transcripts(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    author = MisdeclaringAuthor()
+    OptimizationLoop(
+        config,
+        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        agents={"test_author": author, "search": SearchAgent()},
+    ).run()
+    assert author.saw_retry_evidence
+    decision = read_json(config.loop.run_dir / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "promote"
+
+
 class SearchAgent:
     def __init__(self, text: str = "good") -> None:
         self.text = text
@@ -721,11 +769,25 @@ def test_author_distill_is_committed_back_to_the_world_model(
     # Both candidates earned calibration rows.
     assert summary["calibration_rows"] == 2
     # The second author received the frozen probe bundles to audit.
-    staged_instances = (
-        config.loop.run_dir
-        / "iterations/iter_002/test_author/attempt_1/workspace/battery_instances"
+    author_workspace = (
+        config.loop.run_dir / "iterations/iter_002/test_author/attempt_1/workspace"
     )
-    assert (staged_instances / "behavior-repair-a/test_packet.json").is_file()
+    assert (
+        author_workspace / "battery_instances/behavior-repair-a/test_packet.json"
+    ).is_file()
+    # ... and the archived candidate's record and diff.
+    author_archives = read_json(author_workspace / "archives.json")
+    assert author_archives["archives"][0]["candidate_id"] == "iter001_candidate"
+    assert (author_workspace / "archive/iter001_candidate/candidate.diff").is_file()
+    # The second editor sees every prior candidate's reason, mechanism, diff.
+    history = read_json(
+        config.loop.run_dir / "candidates/iter002_candidate/history.json"
+    )
+    first = history["decisions"][0]
+    assert first["decision"] == "archive"
+    assert first["reason"]
+    assert first["mechanism_claim"]
+    assert Path(first["diff_path"]).is_file()
 
 
 class SilentAuthor(BatteryAuthorAgent):

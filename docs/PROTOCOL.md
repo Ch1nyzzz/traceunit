@@ -67,6 +67,18 @@ Instance rules:
 On a cold start the author clusters the baseline's failing traces into 4-6
 capabilities and builds the initial battery (3-4 instances each).
 
+**Visibility principle**: every agent gets the maximum evidence its role
+permits; blindness is never a default. The Test Author owns the battery and
+sees everything about it: the frozen probe bundles, the admission transcripts
+of its own rejected attempts (previous_output/, previous_admission/), the
+mismatch probe transcripts, the archived candidates' records and diffs, and
+the calibration table. The Candidate Editor sees all real-task evidence -
+failing traces, the full decision history with reasons, claimed mechanisms
+and diffs, archive records, the world model (C3) - but never the probes'
+surfaces (instance ids, descriptions, files): the battery remains a
+measurement only while the measured party cannot read the questions. The
+only other restrictions are the sealed final pool and gold/evaluator data.
+
 ## 4. Candidate and the inner battery loop
 
 The Candidate Editor receives the incumbent's failing search traces, the
