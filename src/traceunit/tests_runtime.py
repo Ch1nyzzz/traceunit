@@ -245,6 +245,8 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
             raise InvalidTestPacket(
                 f"non-public test must live under a hidden directory: {case.path}"
             )
+        if battery_instance and case.driver == "agent_probe":
+            _validate_probe_expectations(case, test_text)
     if battery_instance:
         if len(packet.cases) != 1 or packet.cases[0].tier is not TestTier.PUBLIC:
             raise InvalidTestPacket(
@@ -264,6 +266,43 @@ def validate_test_packet(packet: TestPacket, bundle: Path) -> None:
         case.evidence_role is EvidenceRole.POSITIVE_WITNESS for case in packet.cases
     ):
         raise InvalidTestPacket("packet must contain a positive_witness admission case")
+
+
+def _validate_probe_expectations(case: TestCaseSpec, test_text: str) -> None:
+    """A contains-expectation may only demand text the probe actually gave the
+    agent: computed identifiers from the injected observations, or an output
+    format spelled verbatim in the instructions.
+
+    An invented format string ("AUDIT observed=R-17,V-04 outstanding=ledger")
+    is unpassable for a behaviorally correct policy - a semantically right
+    audit line fails on spelling - and passable by a format-matching patch:
+    false negatives and false positives at once.
+    """
+
+    try:
+        spec = json.loads(test_text)
+    except ValueError:
+        return  # the probe driver reports malformed specs itself
+    if not isinstance(spec, dict):
+        return
+    staged = "\n".join(
+        str(message.get("content") or "")
+        for message in spec.get("messages") or []
+        if isinstance(message, dict)
+    )
+    for expectation in spec.get("expect") or []:
+        if not isinstance(expectation, dict) or expectation.get("negate"):
+            continue
+        if expectation.get("kind") != "contains":
+            continue
+        value = str(expectation.get("value") or "")
+        if value and value not in staged:
+            raise InvalidTestPacket(
+                f"{case.case_id}: contains-expectation {value!r} never appears "
+                "in the staged messages; demand computed identifiers from the "
+                "injected observations, or spell the exact required format "
+                "verbatim in the instructions"
+            )
 
 
 def freeze_test_packet(

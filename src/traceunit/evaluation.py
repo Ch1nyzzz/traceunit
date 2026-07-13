@@ -11,7 +11,12 @@ from traceunit.battery import (
 )
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.config import ProjectConfig
-from traceunit.decision import DecisionPolicy
+from traceunit.decision import (
+    ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED,
+    DecisionPolicy,
+    archive_kind,
+    confirmation_delta,
+)
 from traceunit.io import read_json
 from traceunit.models import (
     BenchmarkEvaluation,
@@ -231,7 +236,67 @@ class CandidateEvaluator:
             total_cost=candidate_eval.cost,
             metadata=metadata,
         )
+        evidence = self._confirm_uncertified_improvement(
+            state=state, proposal=proposal, evidence=evidence
+        )
         return evidence, self.policy.decide(evidence)
+
+    def _confirm_uncertified_improvement(
+        self,
+        *,
+        state: RunState,
+        proposal: CandidateProposal,
+        evidence: EvidenceRecord,
+    ) -> EvidenceRecord:
+        """Re-evaluate a search improvement the battery did not certify.
+
+        A battery miss must not become a permanent loss, but a single search
+        run can also clear the margin by luck. One independent paired re-run
+        decides which it was: a confirmed improvement promotes (the policy
+        reads the confirmation from the evidence), an unconfirmed one stays a
+        record. Pairing for later candidates keeps using the first run.
+        """
+
+        needs_confirmation = (
+            archive_kind(evidence, self.config.decision)
+            == ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED
+        )
+        if not needs_confirmation or confirmation_delta(evidence) is not None:
+            return evidence
+        confirmation_eval = self.evaluate_pool(
+            source=Path(str(evidence.metadata["candidate_source"])),
+            candidate_id=proposal.candidate_id,
+            pool=self.plan.search,
+            cache_tag="confirm",
+        )
+        differences = self._search_differences(
+            parent_id=state.incumbent_id,
+            candidate=confirmation_eval,
+        )
+        confirmed_delta = (
+            sum(differences) / len(differences) if differences else 0.0
+        )
+        metadata = dict(evidence.metadata)
+        metadata["search"] = {
+            **dict(metadata.get("search") or {}),
+            "confirmation": {
+                "candidate_score": confirmation_eval.score,
+                "search_delta": confirmed_delta,
+                "paired_task_count": len(differences),
+            },
+        }
+        self.store.append_event(
+            "search_confirmation_run",
+            iteration=evidence.iteration,
+            candidate_id=proposal.candidate_id,
+            first_delta=evidence.search_delta,
+            confirmation_delta=confirmed_delta,
+        )
+        return replace(
+            evidence,
+            total_cost=evidence.total_cost + confirmation_eval.cost,
+            metadata=metadata,
+        )
 
     def evaluate_pool(
         self,

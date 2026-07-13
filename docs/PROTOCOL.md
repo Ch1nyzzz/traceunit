@@ -47,6 +47,16 @@ Instance rules:
 - **Computed expectations**: probe patterns demand computed output over
   injected observations (exact identifiers, quantities, exclusions), never a
   bare API-name regex.
+- **Format fairness** (host-enforced): a contains-expectation must be text
+  that literally appears in the probe's staged messages - a computed
+  identifier from the injected observations, or an output format the
+  instructions spell out verbatim. An invented exact-format line fails
+  behaviorally correct candidates on spelling and passes format-matching
+  patches: false negatives and false positives at once.
+- **Budget headroom** (host-enforced): at admission the host measures the
+  incumbent's token usage; a probe whose max_tokens is below 2x that usage
+  is rejected. A thin budget judges candidates on verbosity, not behavior,
+  and systematically vetoes verification-style patches.
 - **Admission**: the author declares expected_incumbent_pass per instance;
   the host measures it on the incumbent and rejects the whole update on any
   mismatch. Admitted instances are content-hashed and immutable.
@@ -61,9 +71,11 @@ capabilities and builds the initial battery (3-4 instances each).
 
 The Candidate Editor receives the incumbent's failing search traces, the
 current aggregate search score, the decision history, the archived-candidate
-records, the target capability's spec (group description, instance behavior
-descriptions, incumbent results), and (in C3) a read-only world model copy.
-It implements one general mechanism-level edit (local_repair,
+records, the target capability's spec (the group's mechanism description and
+per-instance incumbent results under opaque codes - never instance ids,
+descriptions, or probe files, whose fictional vocabulary invites
+keyword-matching patches), and (in C3) a read-only world model copy. It
+implements one general mechanism-level edit (local_repair,
 capability_augmentation, or orchestration_change).
 
 After each proposed patch the controller runs **every** battery instance
@@ -79,24 +91,37 @@ verdict.
 ## 5. The five-cell decision
 
 Every mechanically valid candidate is evaluated on the immutable search pool.
-The decision is a pure function of the battery verdict and the paired search
-delta:
+The decision is a function of the battery verdict and the paired search
+delta, with search boundaries at the noise margin: **improved** means
+`delta >= decision.noninferiority_margin` (and positive), **regressed** means
+falling below `-noninferiority_margin`, everything between is **flat**. A
+one-task swing on a small pool is noise, not signal.
 
 | unit \ search | improved | flat (within margin) | regressed |
 | --- | --- | --- | --- |
 | passed | **promote** | **archive** (possible credit-assignment gap) | **reject + mismatch** |
-| failed | **archive + mismatch** | reject | reject |
+| failed | **confirm once** -> promote / archive | reject | reject |
 
 - Promote: the candidate becomes the incumbent and its full-battery results
   become the new incumbent reference all later candidates pair against.
+- Confirm: when search clears the margin but the battery did not certify, a
+  battery miss must not become a permanent loss - the controller runs one
+  independent paired re-evaluation of the candidate. If the confirmation
+  also clears the margin the candidate **promotes** and the disagreement is
+  still staged as a mismatch (the battery must catch up); otherwise the
+  improvement was probably noise and the candidate is archived without a
+  mismatch. Pairing for later candidates keeps using the first run.
 - Archive: the candidate is recorded (diff, record.json) for later agents to
   read and re-litigate; nothing replays or migrates it.
-- Mismatch: the battery and paired search disagreed. The controller writes
-  mismatch/iter_NNN with the diff, the battery deltas and instance results,
-  and the per-task paired flip table; the next Test Author must diagnose it
-  before updating the battery.
+- Mismatch: the battery and paired search disagreed beyond noise. The
+  controller writes mismatch/iter_NNN with the diff, the battery deltas and
+  instance results, and the per-task paired flip table; the next Test Author
+  must diagnose it before updating the battery. After a promoted mismatch
+  the author must make the target group sensitive to the mechanism the
+  battery missed.
 
-A search improvement without a battery certification is never a promotion.
+A search improvement without battery certification promotes only through the
+confirmation re-evaluation; a single lucky run never does.
 
 ## 6. Calibration
 

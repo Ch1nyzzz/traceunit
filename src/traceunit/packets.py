@@ -345,6 +345,16 @@ class BatteryAuthor:
                 python=self.config.benchmark.unit_python,
                 probe_runner=self.benchmark.run_agent_probe,
             )
+            probe_case = packet.cases[0]
+            if probe_case.execution_mode is TestExecutionMode.MODEL_BACKED_PROBE:
+                used_tokens = int(executions[0].tokens or 0)
+                if used_tokens * 2 > probe_case.max_tokens:
+                    raise BatteryError(
+                        f"{instance_id}: the incumbent used {used_tokens} of the "
+                        f"{probe_case.max_tokens}-token budget; a budget below "
+                        "2x the incumbent's usage judges candidates on "
+                        "verbosity, not behavior - raise max_tokens"
+                    )
             measured = bool(executions[0].passed)
             if measured != expected:
                 raise BatteryError(

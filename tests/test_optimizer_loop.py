@@ -445,17 +445,70 @@ def test_unit_pass_with_flat_search_is_archived_as_record(tmp_path: Path) -> Non
     assert reference["behavior-repair-a"] is False
 
 
-def test_search_improvement_with_failed_battery_is_archived_and_staged(
+def test_confirmed_search_improvement_with_failed_battery_promotes(
     tmp_path: Path,
 ) -> None:
-    """Cell 4: search improved, battery not certified -> archive + mismatch."""
+    """Cell 4, confirmed: the search improvement survives an independent
+    re-evaluation, so the candidate promotes and the battery miss is staged
+    as a mismatch for the next Test Author."""
 
     config = _config(tmp_path, ExperimentCondition.FULL)
+    benchmark = FakeBenchmark(tmp_path, natural_gain=True)
     OptimizationLoop(
         config,
         # score rewards 'good', but the battery demands 'great': the edit
         # improves paired search yet fails its target group.
-        benchmark=FakeBenchmark(tmp_path, natural_gain=True),
+        benchmark=benchmark,
+        agents={
+            "test_author": BatteryAuthorAgent(target_text="great"),
+            "search": SearchAgent(),
+        },
+    ).run()
+
+    run = config.loop.run_dir
+    decision = read_json(run / "iterations/iter_001/decision.json")
+    assert decision["decision"] == "promote"
+    assert "confirmation" in decision["reason"]
+    search = decision["evidence"]["metadata"]["search"]
+    assert search["confirmation"]["search_delta"] > 0
+    # baseline + candidate + confirmation = three search runs.
+    assert benchmark.calls.count("search") == 3
+    mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
+    assert mismatch["kind"] == "search_improved_unit_failed"
+    assert mismatch["decision"] == "promote"
+    assert mismatch["target_capability"] == "behavior-repair"
+    assert any(flip["flipped"] for flip in mismatch["task_flips"])
+    events = (run / "events.jsonl").read_text(encoding="utf-8")
+    assert '"search_confirmation_run"' in events
+    state = json.loads((run / "run_state.json").read_text())
+    assert state["incumbent_id"] == "iter001_candidate"
+    assert state["archived_ids"] == []
+    # The promoted candidate's own battery results (target still failing)
+    # become the reference: the group keeps something for the author to fix.
+    reference = read_json(run / "battery/incumbent_results.json")
+    assert reference["behavior-repair-a"] is False
+
+
+class LuckyOnceBenchmark(FakeBenchmark):
+    """The candidate's first search run improves; its confirmation does not."""
+
+    def evaluate(self, *, source: Path, candidate_id: str, pool, out_dir: Path):
+        self.natural_gain = not candidate_id.endswith("__confirm")
+        return super().evaluate(
+            source=source, candidate_id=candidate_id, pool=pool, out_dir=out_dir
+        )
+
+
+def test_unconfirmed_search_improvement_is_archived_as_noise(
+    tmp_path: Path,
+) -> None:
+    """Cell 4, unconfirmed: the improvement vanishes on re-evaluation, so the
+    candidate stays a record and no mismatch wastes the author's attention."""
+
+    config = _config(tmp_path, ExperimentCondition.FULL)
+    OptimizationLoop(
+        config,
+        benchmark=LuckyOnceBenchmark(tmp_path, natural_gain=True),
         agents={
             "test_author": BatteryAuthorAgent(target_text="great"),
             "search": SearchAgent(),
@@ -465,16 +518,11 @@ def test_search_improvement_with_failed_battery_is_archived_and_staged(
     run = config.loop.run_dir
     decision = read_json(run / "iterations/iter_001/decision.json")
     assert decision["decision"] == "archive"
-    assert "battery did not certify" in decision["reason"]
+    assert "did not survive the confirmation" in decision["reason"]
     record = read_json(run / "archive/iter001_candidate/record.json")
     assert record["kind"] == "search_improved_unit_failed"
     assert record["search_delta"] > 0
-    assert record["target_improved"] is False
-    mismatch = read_json(run / "mismatch/iter_001/mismatch.json")
-    assert mismatch["kind"] == "search_improved_unit_failed"
-    assert mismatch["target_capability"] == "behavior-repair"
-    assert any(flip["flipped"] for flip in mismatch["task_flips"])
-    assert (run / "mismatch/iter_001/candidate.diff").is_file()
+    assert not (run / "mismatch").exists()
     state = json.loads((run / "run_state.json").read_text())
     assert state["incumbent_id"] == "baseline"
     assert state["archived_ids"] == ["iter001_candidate"]
@@ -779,7 +827,10 @@ class LearningEditor:
                 for item in feedback["target_instances"]
                 if not item["candidate_passed"]
             ]
-            assert failing and failing[0]["description"]
+            # The editor sees opaque codes, never probe ids or descriptions.
+            assert failing and failing[0]["instance"].startswith("instance_")
+            assert "description" not in failing[0]
+            assert "instance_id" not in failing[0]
             assert feedback["damaged_capabilities"] == {}
             (workspace / "source/behavior.txt").write_text("good", encoding="utf-8")
         write_json(
@@ -856,7 +907,12 @@ def test_proposer_sees_target_traces_score_and_world_model(tmp_path: Path) -> No
     assert (candidate / "ut_design_world_model.md").is_file()
     target = read_json(candidate / "target_capability.json")
     assert target["target_capability"] == "behavior-repair"
-    assert target["instances"] and target["instances"][0]["description"]
+    # Anonymous instance results only: the mechanism description is the
+    # group's, and the probes' ids/descriptions never reach the editor.
+    assert target["instances"]
+    assert target["instances"][0]["instance"] == "instance_01"
+    assert "description" not in target["instances"][0]
+    assert "instance_id" not in target["instances"][0]
 
 
 class FailingAuthor:

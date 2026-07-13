@@ -67,6 +67,44 @@ def test_cell4_search_gain_with_failed_unit_archives_as_mismatch() -> None:
     assert archive_kind(evidence, config) == ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED
 
 
+def _with_confirmation(delta: float, confirmed: float) -> EvidenceRecord:
+    return _evidence(
+        search_delta=delta,
+        target_improved=False,
+        metadata={"search": {"confirmation": {"search_delta": confirmed}}},
+    )
+
+
+def test_cell4_confirmed_improvement_promotes_and_stays_a_mismatch() -> None:
+    config = DecisionConfig(noninferiority_margin=0.02)
+    evidence = _with_confirmation(0.1, 0.08)
+    result = DecisionPolicy(config).decide(evidence)
+    assert result.decision is Decision.PROMOTE
+    assert "confirmation" in result.reason
+    assert is_mismatch(evidence, config)
+
+
+def test_cell4_unconfirmed_improvement_archives_without_mismatch() -> None:
+    config = DecisionConfig(noninferiority_margin=0.02)
+    evidence = _with_confirmation(0.1, 0.0)
+    result = DecisionPolicy(config).decide(evidence)
+    assert result.decision is Decision.ARCHIVE
+    assert "did not survive" in result.reason
+    assert not is_mismatch(evidence, config)
+    assert archive_kind(evidence, config) == ARCHIVE_SEARCH_IMPROVED_UNIT_FAILED
+
+
+def test_sub_margin_search_gain_with_failed_unit_is_a_plain_reject() -> None:
+    # A one-task swing below the noise margin is flat, not cell 4: it earns
+    # neither an archive nor a mismatch that would dilute author attention.
+    config = DecisionConfig(noninferiority_margin=0.045)
+    evidence = _evidence(search_delta=0.044, target_improved=False)
+    result = DecisionPolicy(config).decide(evidence)
+    assert result.decision is Decision.REJECT
+    assert not is_mismatch(evidence, config)
+    assert archive_kind(evidence, config) is None
+
+
 def test_cell5_both_failed_rejects() -> None:
     config = DecisionConfig()
     for delta in (0.0, -0.1):

@@ -42,16 +42,20 @@ the two-step flow).
 | unit \ search | improved | flat | regressed |
 | --- | --- | --- | --- |
 | passed | promote | archive (credit-assignment gap?) | reject + mismatch |
-| failed | archive + mismatch | reject | reject |
+| failed | confirm once -> promote / archive | reject | reject |
 
-The unit verdict is the battery: the diagnosed capability's pass rate
-improved **and** no other capability dropped beyond
-`decision.max_battery_regression`. On promote, the candidate's full-battery
-results become the new incumbent reference. Archives are records - diff plus
-record.json - staged to later editors as reference material; re-litigation
-goes through the normal propose -> battery -> search path. A mismatch means
-the battery and the search distribution disagreed; the mismatch record is
-handed to the next Test Author to diagnose.
+Search boundaries sit at the noise margin (`decision.noninferiority_margin`):
+a sub-margin delta is flat, not signal. The unit verdict is the battery: the
+diagnosed capability's pass rate improved **and** no other capability dropped
+beyond `decision.max_battery_regression`. On promote, the candidate's
+full-battery results become the new incumbent reference. When search clearly
+improves without battery certification, one independent paired re-evaluation
+decides: confirmed -> promote (and the mismatch is still staged - the battery
+must catch up), unconfirmed -> archive as probable noise. Archives are
+records - diff plus record.json - staged to later editors as reference
+material; re-litigation goes through the normal propose -> battery -> search
+path. A mismatch means the battery and the search distribution disagreed;
+the mismatch record is handed to the next Test Author to diagnose.
 
 ## Battery instances
 
@@ -65,8 +69,17 @@ sandbox as before (deterministic or live model probe). Hard rules:
 - **Computed expectations**: probe patterns demand computed output over the
   injected observations (exact identifiers, quantities, exclusions), never a
   bare API-name regex that a verbal prompt reminder could elicit.
+- **Format fairness** (host-enforced): a contains-expectation must literally
+  appear in the probe's staged messages - check computed identifiers one by
+  one, or spell the required output format verbatim in the instructions.
+- **Budget headroom** (host-enforced): max_tokens must be at least 2x the
+  incumbent's measured usage, so probes judge behavior, not verbosity.
 - Groups are capped (`loop.max_instances_per_capability`); the Test Author
   retires instances before adding beyond the cap.
+- The Candidate Editor sees the group's mechanism description and anonymous
+  per-instance results only - never instance ids, descriptions, or probe
+  files - so passing the battery requires acquiring the mechanism, not
+  matching probe vocabulary.
 
 Capabilities map to the frozen L0 registry (`instruction`, `context`,
 `planning`, `retrieval`, `tool`, `state`, `verification`, `recovery`,

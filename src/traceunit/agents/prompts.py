@@ -48,7 +48,7 @@ _INSTANCE_PACKET_EXAMPLE = {
             "driver": "agent_probe",
             "path": "tests/public/probe.json",
             "max_model_calls": 1,
-            "max_tokens": 4096,
+            "max_tokens": 16384,
             "expected_incumbent_pass": False,
             "expected_candidate_pass": True,
         }
@@ -150,7 +150,12 @@ def battery_author_prompt(
                 "read the failing instances, the candidate diff, and the failed "
                 "search traces, and name concretely what the battery measured "
                 "that the search tasks do not (or the reverse). Your update must "
-                "not repeat that gap."
+                "not repeat that gap. If the mismatch candidate was PROMOTED (its "
+                "search improvement held under an independent confirmation), the "
+                "battery missed a real mechanism: your update must make the "
+                "target group sensitive to that mechanism - typically by "
+                "retiring the instances the promoted patch could not move and "
+                "admitting instances that probe what the patch actually does."
             )
         memory_guidance = distill_step + (
             " Apply your own accumulated design rules; they never override the "
@@ -168,7 +173,13 @@ def battery_author_prompt(
         "and requires every expectation to hold. Expectations must demand computed "
         "output over the injected observations (exact identifiers, quantities, "
         "exclusions) - never a bare API-name regex that a verbal prompt reminder "
-        "could elicit."
+        "could elicit. Expectations must accept ANY correct rendering: check each "
+        "computed identifier with its own contains-expectation instead of one exact "
+        "format line the agent was never told (host-enforced: a contains value must "
+        "literally appear in your staged messages, so if you require an exact output "
+        "format, spell that format verbatim in the instructions). Give max_tokens at "
+        "least 2x what the incumbent actually uses (host-measured at admission): a "
+        "thin budget judges candidates on verbosity, not behavior."
         if probes_supported
         else "This benchmark does not support model-backed probes: every case must "
         "use execution_mode='deterministic' with driver 'python' or 'pytest'."
@@ -219,6 +230,11 @@ Hard rules for instances:
   instance against the incumbent and rejects the whole update on a mismatch.
 - Groups are capped at {max_instances_per_capability} active instances; retire
   before adding beyond the cap. Do not edit or delete existing instances on disk.
+- capability_descriptions must describe the mechanism only and never reuse the
+  instances' fictional surface nouns: the Candidate Editor sees the group
+  description and anonymous per-instance results, never instance ids or
+  descriptions, so a description that leaks probe vocabulary invites
+  keyword-matching patches.
 
 Choose family only from the frozen L0 registry:
 {prompt_definitions()}
@@ -321,11 +337,15 @@ repairs the diagnosed capability deficit. The capability battery is your cheap
 alignment check: after you finish, the harness runs every battery instance - the
 target capability's group plus every other capability - and hands failures back to
 you for another attempt, all before the expensive search evaluation. The battery
-instances live in domains other than the benchmark's, so a prompt sentence naming
-one task's API moves nothing: repair the policy itself. A rule that fires outside
-its intended context damages the other capability groups and fails the verdict, so
-prefer scoped, minimal mechanisms over broad prompt additions. Promotion is decided
-by paired search on real tasks.
+instances live in domains other than the benchmark's, and you see only the group's
+mechanism description and anonymous per-instance results - there is no probe
+surface to match, so a prompt sentence naming an API or an output format moves
+nothing: repair the policy itself. A rule that fires outside its intended context
+damages the other capability groups and fails the verdict, so prefer scoped,
+minimal mechanisms over broad prompt additions. Promotion is decided by paired
+search on real tasks; a genuine improvement the battery misses is confirmed by an
+independent re-evaluation rather than lost, so never trade real-task generality
+for battery passes.
 
 Do not access the battery's probe files, benchmark evaluators, gold data, held-out
 pools, or final tasks. Run a syntax/import smoke check before finishing.
@@ -355,12 +375,13 @@ Concrete results: {feedback_path}
 Editable source (already contains your previous edit): {source_dir}
 Target capability: {target_capability_path}
 
-Read the feedback first. target_instances shows how each variant of the diagnosed
-capability behaved; damaged_capabilities lists instances of OTHER capabilities your
-edit broke - that is collateral damage from a rule firing outside its context, and
-scoping your mechanism is usually the fix. Refine your edit, or revert and take a
-different approach to the same capability; do not weaken or game the battery. Run a
-syntax/import smoke check before finishing.
+Read the feedback first. target_instances shows how each anonymous variant of the
+diagnosed capability behaved (budget_exhausted means the reply overran the probe's
+token budget rather than misbehaving); damaged_capabilities counts flips in OTHER
+capability groups - that is collateral damage from a rule firing outside its
+context, and scoping your mechanism is usually the fix. Refine your edit, or revert
+and take a different approach to the same capability; do not weaken or game the
+battery. Run a syntax/import smoke check before finishing.
 
 Update {proposal_path} if your mechanism changed; keep candidate_id and parent_id
 unchanged.

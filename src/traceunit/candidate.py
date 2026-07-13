@@ -200,8 +200,13 @@ class CandidateBuilder:
         self, target_capability: str, target_family: UnitFamily
     ) -> dict[str, Any]:
         """The target capability as staged to the proposer: the group's
-        description and its instances' behavior descriptions plus incumbent
-        results - the capability spec, never the probe files themselves."""
+        mechanism description and its instances' incumbent results under
+        opaque codes - never instance ids, descriptions, or probe files.
+
+        Instance ids and descriptions carry the probes' fictional surface
+        vocabulary; an editor that sees them keyword-matches the probes
+        instead of repairing the mechanism (the v4 AppWorld run promoted a
+        patch whose regexes were lifted from instance descriptions)."""
 
         summary = self.battery.state_summary()
         group = next(
@@ -212,11 +217,19 @@ class CandidateBuilder:
             ),
             None,
         )
+        codes = opaque_instance_codes(self.battery, target_capability)
         return {
             "target_capability": target_capability,
             "family": target_family.value,
             "description": (group or {}).get("description", ""),
-            "instances": (group or {}).get("instances", []),
+            "instances": [
+                {
+                    "instance": codes[item["instance_id"]],
+                    "incumbent_passed": item.get("incumbent_passed"),
+                }
+                for item in (group or {}).get("instances", [])
+                if item.get("instance_id") in codes
+            ],
         }
 
     def _run_editor(
@@ -328,36 +341,57 @@ class CandidateBuilder:
         return archives
 
 
+def opaque_instance_codes(
+    battery: Battery, target_capability: str
+) -> dict[str, str]:
+    """Stable editor-side codes for the target group's active instances.
+
+    The battery is frozen while a candidate is built, so sorting the active
+    instance ids gives the same code for the same instance across every inner
+    attempt of an iteration - without exposing the id itself."""
+
+    ids = sorted(
+        item.instance_id
+        for item in battery.active()
+        if item.capability == target_capability
+    )
+    return {
+        instance_id: f"instance_{index + 1:02d}"
+        for index, instance_id in enumerate(ids)
+    }
+
+
 def unit_feedback(
     unit: UnitEvidence, *, battery: Battery, attempt: int
 ) -> dict[str, Any]:
     """Concrete battery feedback for the proposer's next inner attempt.
 
-    Target-capability instances come with their behavior descriptions and
-    outcomes; damaged other capabilities are named with the instances that
-    flipped, so collateral damage is visible while the patch is still cheap
-    to change.
+    Target-capability instances report pass/fail, timeouts, and budget
+    exhaustion under opaque codes; damaged other capabilities are named at
+    the group level with flip counts. The mechanism description in the target
+    view is the direction to repair - the probes' surfaces stay hidden so the
+    editor cannot keyword-match them.
     """
 
-    descriptions = {
-        item.instance_id: item.description for item in battery.load()
-    }
+    codes = opaque_instance_codes(battery, unit.target_capability)
     reference = battery.load_reference()
     target_instances = []
-    collateral: dict[str, list[dict[str, Any]]] = {}
+    collateral: dict[str, int] = {}
     for result in unit.results:
-        entry = {
-            "instance_id": result.instance_id,
-            "description": descriptions.get(result.instance_id, ""),
-            "incumbent_passed": reference.get(result.instance_id),
-            "candidate_passed": result.passed,
-            "timed_out": result.timed_out,
-            "error": result.error,
-        }
         if result.capability == unit.target_capability:
-            target_instances.append(entry)
+            target_instances.append(
+                {
+                    "instance": codes.get(result.instance_id, "instance_??"),
+                    "incumbent_passed": reference.get(result.instance_id),
+                    "candidate_passed": result.passed,
+                    "timed_out": result.timed_out,
+                    "budget_exhausted": "token budget" in (result.error or ""),
+                    "error": result.error,
+                }
+            )
         elif reference.get(result.instance_id) and not result.passed:
-            collateral.setdefault(result.capability, []).append(entry)
+            collateral[result.capability] = collateral.get(result.capability, 0) + 1
+    target_instances.sort(key=lambda entry: str(entry["instance"]))
     return {
         "attempt": attempt,
         "violations": list(unit.violations),
@@ -365,6 +399,9 @@ def unit_feedback(
         "target_improved": unit.target_improved,
         "target_instances": target_instances,
         "collateral_ok": unit.collateral_ok,
-        "damaged_capabilities": collateral,
+        "damaged_capabilities": {
+            capability: {"instances_flipped": count}
+            for capability, count in sorted(collateral.items())
+        },
         "capability_deltas": unit.deltas,
     }
