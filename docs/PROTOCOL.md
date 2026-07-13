@@ -17,98 +17,95 @@ Before a run:
 The final manifest is never exposed to the Test Author, the Candidate Editor,
 or ordinary search code.
 
-## 2. L0 diagnosis
+## 2. Capability diagnosis
 
-The canonical L0 values are:
+The canonical L0 families are:
 
 ~~~
 instruction context planning retrieval tool state
 verification recovery termination other uncertain
 ~~~
 
-The Test Author may mention only trace-supported alternatives and must select
-one primary_family for the packet. other and uncertain are valid honest
-outcomes; neither creates a family score or forces a finer taxonomy.
+A capability is a freeform slug (e.g. `evidence-before-mutation`) mapped to
+one L0 family. The Test Author diagnoses the root-cause capability behind the
+incumbent's failing traces - the first-principles deficit, never the surface
+of one task. `other` and `uncertain` remain valid honest family outcomes.
 
-A packet also records a free-text mechanism, target boundary, failure claim,
-and intervention kind. These fields carry detail that must not be encoded by
-inventing new family IDs.
+## 3. The capability battery
 
-## 3. Packet freeze
+The battery is the persistent unit-test axis: capability groups, each holding
+several instances. One instance is a frozen single-case packet bundle
+(`packet_kind: battery_instance`) probing one decision boundary, executed in
+the sandboxed deterministic/probe runtime.
 
-A normal packet contains:
+Instance rules:
 
-- at least two competing trace-grounded hypotheses;
-- exactly one target hypothesis and one packet-level primary_family;
-- one public reproducer, one hidden structural sibling, a positive witness, and
-  an off-target regression;
-- a bridge when a downstream behavioral bridge can be represented;
-- an evidence_role for every case.
+- **Cross-domain**: an instance never reuses the search tasks' app names,
+  APIs, entities, or literal values. Sibling instances in a group vary the
+  surface (domain, entities, phrasing) while keeping the mechanism, so a
+  one-domain verbal prompt reminder cannot move the group's pass rate.
+- **Computed expectations**: probe patterns demand computed output over
+  injected observations (exact identifiers, quantities, exclusions), never a
+  bare API-name regex.
+- **Admission**: the author declares expected_incumbent_pass per instance;
+  the host measures it on the incumbent and rejects the whole update on any
+  mismatch. Admitted instances are content-hashed and immutable.
+- **Bounded groups**: at most `loop.max_instances_per_capability` active
+  instances per group; the author retires before adding beyond the cap. The
+  target group must retain at least one active incumbent-failing instance.
 
-Tests must be grounded in real model behavior: prefer a model-backed probe or a
-replay of real trace structure over a scripted fake client that branches on
-prompt keywords. A keyword-matching stub certifies string content, not
-behavior, and its verdicts will not track the search distribution.
+On a cold start the author clusters the baseline's failing traces into 4-6
+capabilities and builds the initial battery (3-4 instances each).
 
-The controller runs the proposed packet on the incumbent. Every case must meet
-its declared incumbent outcome. Only then is the packet content-addressed and
-marked admission_passed=true. The packet is immutable after admission, and one
-fresh packet is authored per iteration.
-
-## 4. Candidate and the inner unit loop
+## 4. Candidate and the inner battery loop
 
 The Candidate Editor receives the incumbent's failing search traces, the
 current aggregate search score, the decision history, the archived-candidate
-records, the public part of the frozen packet, and (in C3) a read-only copy of
-the UT-design world model. It implements one general mechanism-level edit:
+records, the target capability's spec (group description, instance behavior
+descriptions, incumbent results), and (in C3) a read-only world model copy.
+It implements one general mechanism-level edit (local_repair,
+capability_augmentation, or orchestration_change).
 
-- local_repair;
-- capability_augmentation, such as a red-team agent, debate, self-critique,
-  retrieval component, or test writer;
-- orchestration_change.
-
-The frozen packet is the editor's cheap alignment check. After each proposed
-patch the controller runs the full frozen suite plus every preserved contract
-host-side; on failure the concrete results go back to the same editor for
-another attempt, up to loop.max_inner_retries times. Public cases feed back
-their captured output; hidden cases reveal only their declared description and
-pass/fail, so the hidden tier keeps measuring generalization. When the loop
-ends - pass or retries exhausted - the last attempt's unit evidence is the
-authoritative unit verdict, and the candidate proceeds to paired search.
+After each proposed patch the controller runs **every** battery instance
+host-side. The unit verdict is two-sided: the target capability's pass count
+must exceed the incumbent reference, and no other capability's pass rate may
+drop by more than `decision.max_battery_regression` - collateral damage fails
+the verdict while the patch is still cheap to change. On failure the concrete
+per-instance results return to the same editor, up to
+`loop.max_inner_retries` times. The last attempt's battery evidence is
+authoritative, and the candidate proceeds to paired search regardless of the
+verdict.
 
 ## 5. The five-cell decision
 
 Every mechanically valid candidate is evaluated on the immutable search pool.
-The decision is a pure function of the unit verdict (frozen contract,
-preserved contracts, regressions) and the paired search delta:
+The decision is a pure function of the battery verdict and the paired search
+delta:
 
 | unit \ search | improved | flat (within margin) | regressed |
 | --- | --- | --- | --- |
 | passed | **promote** | **archive** (possible credit-assignment gap) | **reject + mismatch** |
 | failed | **archive + mismatch** | reject | reject |
 
-- Promote: the candidate becomes the incumbent and its packet becomes a
-  preserved contract.
+- Promote: the candidate becomes the incumbent and its full-battery results
+  become the new incumbent reference all later candidates pair against.
 - Archive: the candidate is recorded (diff, record.json) for later agents to
   read and re-litigate; nothing replays or migrates it.
-- Mismatch: the unit verdict and paired search disagreed. The controller
-  writes mismatch/iter_NNN with the frozen packet, the candidate diff, the
-  per-task paired flip table, and pointers to both sides' traces. The next
-  Test Author must diagnose it before designing a new packet.
+- Mismatch: the battery and paired search disagreed. The controller writes
+  mismatch/iter_NNN with the diff, the battery deltas and instance results,
+  and the per-task paired flip table; the next Test Author must diagnose it
+  before updating the battery.
 
-A search improvement without a passed contract is never a certified promotion.
+A search improvement without a battery certification is never a promotion.
 
-## 6. Archives are records, not capabilities
+## 6. Calibration
 
-There is one immutable frozen-packet store for **preserved** contracts (from
-promoted candidates); every later candidate must keep satisfying them inside
-the inner unit loop.
-
-Archived candidates carry no protocol status. Their records are staged into
-later editors' workspaces as reference material; an editor that finds an
-archived idea valuable rebuilds it and takes it through the normal
-propose -> unit -> search path. Nothing is replayed, realized, or migrated on
-the candidate's behalf.
+For every search-evaluated candidate the host appends one row to
+`battery/calibration.jsonl`: per-capability battery deltas, per-instance
+results, and the paired search delta. From these it derives per-capability
+direction agreement and the list of constant (information-free) instances,
+staged to the Test Author as a markdown table. Calibration informs the
+author's attention and retirements; it never gates a decision by itself.
 
 ## 7. UT-design world model (C3)
 
@@ -122,30 +119,34 @@ world model + last_iteration.json (+ mismatch evidence)
 ~~~
 
 The staged evidence is raw: the previous decision, the per-task paired search
-flips, the unit results, and on a mismatch the frozen tests, the diff, and the
-failed traces. The harness owns no schema, sanitization, or fallback text; a
-skipped distill is recorded as a world_model_not_updated event. The world
-model is guidance for designing later tests; it never overrides current trace
-evidence and never ranks L0 directions.
+flips, the battery deltas, and on a mismatch the failing instances, the diff,
+and the failed traces. The harness owns no schema, sanitization, or fallback
+text; a skipped distill is recorded as a world_model_not_updated event. The
+world model guides later battery design; it never overrides current trace
+evidence and never ranks L0 families.
 
 ## 8. Resume
 
 decision.json and evidence.json are a commit boundary. If a process stops
 after writing them, resume loads those artifacts, commits any missing state
-effect, and advances the iteration. It does not rerun local tests or search
-evaluation. Inside an iteration, packet_ref.json and inner_state.json make
-packet authoring and the inner unit loop resumable.
+effect, and advances the iteration. It does not rerun battery instances or
+search evaluation. Inside an iteration, battery_update_ref.json and
+inner_state.json make the author update and the inner loop resumable. Three
+consecutive skipped iterations (agent failures) halt the run, hand the
+skipped iterations back, and leave it resumable.
 
 ## 9. Final evaluation
 
-Final evaluation is a distinct sealed command. It consumes the final manifest
-only after search finishes. Its result does not alter run state, the world
-model, the packet store, or decisions.
+Final evaluation is a distinct sealed command, chained automatically after a
+completed search run (`--no-final` disables). It consumes the final manifest
+only after search finishes. Its result does not alter run state, the battery,
+the world model, or decisions.
 
 ## 10. Scope of claims
 
-The main experiment can claim that trace-conditioned UT design, used as a
-cheap inner alignment check with an online self-written world model, helps
-search-pool optimization under the stated protocol. It cannot claim that a
-particular L0 direction has intrinsically higher transfer value. Transfer
-itself is measured only by the sealed final evaluation.
+The main experiment can claim that a trace-conditioned capability battery,
+used as a cheap inner alignment check with host-computed calibration and an
+online self-written world model, helps search-pool optimization under the
+stated protocol. It cannot claim that a particular capability has
+intrinsically higher transfer value. Transfer itself is measured only by the
+sealed final evaluation.

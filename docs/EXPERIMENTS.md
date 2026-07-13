@@ -2,10 +2,10 @@
 
 ## Research question
 
-Does trace-conditioned unit-test design - used as a cheap inner alignment
-check for the proposer - improve agent-harness optimization, and does an
-online, self-written world model over earlier packets and their search
-outcomes improve the design of later packets?
+Does a trace-conditioned capability battery - atomic-capability probes used
+as a cheap inner alignment check for the proposer - improve agent-harness
+optimization, and do host-computed calibration plus an online, self-written
+world model improve the design of later battery instances?
 
 This is an optimization study. The search pool is the online objective. It is
 unseen to the Test Author when a packet is frozen in an iteration, but it is
@@ -17,10 +17,10 @@ sealed final evaluation.
 
 | Condition | Editor input | Packet / archive / memory |
 | --- | --- | --- |
-| C0 | search traces and score history | no packet, no records, no memory |
-| C1 | traces plus trace-conditioned packet (inner unit loop) | packet only |
-| C2 | C1 plus archived-candidate records | packet plus archive records |
-| C3 | C2 plus the append-only UT-design world model | packet, records, world model |
+| C0 | search traces and score history | no battery, no records, no memory |
+| C1 | traces plus the capability battery (inner unit loop) | battery only |
+| C2 | C1 plus archived-candidate records | battery plus archive records |
+| C3 | C2 plus the append-only UT-design world model | battery, records, world model |
 
 All conditions use the same:
 
@@ -40,10 +40,11 @@ Report for every condition:
 - number of promotions, archives (by kind), mismatches, and rejects;
 - inner-loop statistics: attempts per candidate and how often the loop
   converted a failing first patch into a passing one;
-- packet admission and candidate-contract pass rates;
-- search outcome conditional on unit pass or failure (the unit/search
-  agreement rate - the direct measure of whether the UTs track the search
-  distribution);
+- battery composition over time (groups, instances, retirements) and
+  instance admission pass rates;
+- search outcome conditional on the battery verdict (the unit/search
+  agreement rate - the direct measure of whether the battery tracks the
+  search distribution), per capability from the calibration ledger;
 - C3 world-model distill count and whether distills respond to mismatches;
 - final sealed paired outcome after the search run is complete.
 
@@ -53,9 +54,9 @@ coarse trace-diagnosis descriptor.
 ## Interpretation
 
 A useful C3 result is not merely a higher immediate search score. It should
-show that later packets become more diagnostic: rising unit/search agreement,
-fewer repeated mismatches of the same kind, tests that move from scripted
-stubs toward probes and trace replays, and stronger sealed-final performance.
+show that the battery becomes more predictive: rising unit/search agreement
+per capability, fewer repeated mismatches of the same kind, retirement of
+information-free instances, and stronger sealed-final performance.
 
 A unit/search mismatch is evidence to inspect, not proof that a UT was bad.
 Possible causes include a weak packet, edit overfit, an incomplete trace
