@@ -226,8 +226,14 @@ def battery_author_prompt(
             "Choose it as target_capability (an existing group or a new one), and "
             "update the battery: add cross-domain instances where coverage is "
             "thin, retire instances the calibration flags as uninformative or "
-            "misleading. After your update the target group must contain at least "
-            "one active instance the incumbent fails."
+            "misleading. Check your choice against the calibration table before "
+            "committing to it: if a group's battery gains have repeatedly failed "
+            "to convert into search gains, re-targeting it requires a concrete "
+            "new hypothesis for why this attempt differs - otherwise pick the "
+            "capability the calibration and traces jointly support. The residual "
+            "failing traces always look like the last capability you probed; do "
+            "not let that alone pin the target. After your update the target "
+            "group must contain at least one active instance the incumbent fails."
         )
     )
     return f"""You are the Test Author. You maintain the capability battery: a persistent,

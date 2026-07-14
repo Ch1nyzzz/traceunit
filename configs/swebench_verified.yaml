@@ -1,6 +1,6 @@
 loop:
-  run_dir: ../runs/swebench_verified_traceunit_v4
-  run_id: swebench_verified_traceunit_v4
+  run_dir: ../runs/swebench_verified_traceunit_v5
+  run_id: swebench_verified_traceunit_v5
   iterations: 20
   resume: true
   max_failure_traces: 16
