@@ -401,16 +401,19 @@ class BatteryAuthor:
                     "model-backed probes"
                 )
             expected = bool(item.get("expected_incumbent_pass", False))
+            admission_dir = (
+                iteration_dir
+                / "test_author"
+                / f"attempt_{attempt}"
+                / "admission"
+                / instance_id
+            )
             executions = run_test_cases(
                 packet=packet,
                 bundle=bundle,
                 source=Path(state.incumbent_source),
                 subject="incumbent",
-                output_dir=iteration_dir
-                / "test_author"
-                / f"attempt_{attempt}"
-                / "admission"
-                / instance_id,
+                output_dir=admission_dir,
                 python=self.config.benchmark.unit_python,
                 probe_runner=self.benchmark.run_agent_probe,
             )
@@ -419,10 +422,31 @@ class BatteryAuthor:
                 used_tokens = int(executions[0].tokens or 0)
                 if used_tokens * 2 > probe_case.max_tokens:
                     raise BatteryError(
-                        f"{instance_id}: the incumbent used {used_tokens} of the "
-                        f"{probe_case.max_tokens}-token budget; a budget below "
-                        "2x the incumbent's usage judges candidates on "
-                        "verbosity, not behavior - raise max_tokens"
+                        f"{instance_id}: the incumbent used {used_tokens} "
+                        f"completion tokens of the {probe_case.max_tokens} "
+                        "budget; a budget below 2x the incumbent's usage "
+                        "judges candidates on verbosity, not behavior - "
+                        "raise max_tokens"
+                    )
+                # A borderline probe flips between identical temperature-0
+                # runs, turning the declaration check into a lottery the
+                # author cannot win; demand a decisive boundary instead.
+                recheck = run_test_cases(
+                    packet=packet,
+                    bundle=bundle,
+                    source=Path(state.incumbent_source),
+                    subject="incumbent",
+                    output_dir=admission_dir / "stability_recheck",
+                    python=self.config.benchmark.unit_python,
+                    probe_runner=self.benchmark.run_agent_probe,
+                )
+                if bool(recheck[0].passed) != bool(executions[0].passed):
+                    raise BatteryError(
+                        f"{instance_id}: unstable probe - two identical "
+                        "admission runs disagreed (the incumbent sits on this "
+                        "instance's decision boundary); redesign the probe "
+                        "with a more decisive boundary instead of adjusting "
+                        "the declaration"
                     )
             measured = bool(executions[0].passed)
             if measured != expected:
