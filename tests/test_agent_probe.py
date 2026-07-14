@@ -48,7 +48,12 @@ def _transport(reply: str, *, tokens: int = 100, calls: list | None = None):
         assert payload["temperature"] == 0.0
         return {
             "choices": [{"message": {"content": reply}}],
-            "usage": {"total_tokens": tokens},
+            # completion_tokens drives the budget; total includes the prompt
+            # and must not count against the reply cap.
+            "usage": {
+                "completion_tokens": tokens,
+                "total_tokens": tokens + 10_000,
+            },
         }
 
     return send

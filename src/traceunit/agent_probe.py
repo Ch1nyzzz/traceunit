@@ -132,7 +132,10 @@ def run_declarative_probe(
     except (KeyError, IndexError, TypeError):
         return finish(False, "probe response has no assistant message")
     usage = response.get("usage") or {}
-    tokens = int(usage.get("total_tokens") or 0)
+    # The budget semantics are completion tokens: case.max_tokens is sent to
+    # the API as the completion cap, and the prompt (which may inline large
+    # source files) is the author's fixed design choice, not reply verbosity.
+    tokens = int(usage.get("completion_tokens") or usage.get("total_tokens") or 0)
     record["reply"] = reply
     record["usage"] = dict(usage)
 

@@ -203,9 +203,10 @@ def battery_author_prompt(
         "computed identifier with its own contains-expectation instead of one exact "
         "format line the agent was never told (host-enforced: a contains value must "
         "literally appear in your staged messages, so if you require an exact output "
-        "format, spell that format verbatim in the instructions). Give max_tokens at "
-        "least 2x what the incumbent actually uses (host-measured at admission): a "
-        "thin budget judges candidates on verbosity, not behavior."
+        "format, spell that format verbatim in the instructions). max_tokens caps the "
+        "REPLY (completion) only - inlined source files in the prompt do not count. "
+        "Give it at least 2x the incumbent's measured completion usage (host-checked "
+        "at admission): a thin budget judges candidates on verbosity, not behavior."
         if probes_supported
         else "This benchmark does not support model-backed probes: every case must "
         "use execution_mode='deterministic' with driver 'python' or 'pytest'."
