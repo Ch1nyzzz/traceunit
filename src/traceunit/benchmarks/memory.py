@@ -1,8 +1,12 @@
-"""Adapters for the WorldCalib LoCoMo and LongMemEval memory benchmarks.
+"""Adapters for the LoCoMo and LongMemEval memory benchmarks.
 
-The data and evaluator stay host-side.  Candidate editors receive a compact copy
+The data and evaluator stay host-side. Candidate editors receive a compact copy
 of the memory scaffold implementation, while this adapter loads the candidate
-inside WorldCalib's dynamic loader and scores it against redacted task views.
+inside the vendored memory substrate's dynamic loader and scores it against
+redacted task views. The evaluation substrate is vendored in-repo under
+``vendor/worldcalib_memory`` (Python package name kept as ``worldcalib`` so its
+internal imports and the candidate seed package structure need no rewrite), so
+the adapter carries no dependency on an external WorldCalib checkout.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Mapping
 
+import traceunit
 from traceunit.agent_probe import run_declarative_probe
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
@@ -37,6 +42,15 @@ from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 _ADAPTER_VERSION = 1
 _MINIMAL_PACKAGE_INIT = '"""TraceUnit editable memory-scaffold package."""\n'
+
+
+def _vendored_worldcalib_root() -> Path:
+    """Root of the vendored memory evaluation substrate (holds src/worldcalib)."""
+
+    return (
+        Path(traceunit.__file__).parent / "vendor" / "worldcalib_memory"
+    ).resolve()
+
 _MEMORY_SOURCE_FILES = (
     "metrics.py",
     "model.py",
@@ -365,10 +379,10 @@ class _MemoryQAAdapter(BenchmarkAdapter):
         )
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
-        root = self.config.worldcalib_root
+        root = _vendored_worldcalib_root()
         if not (root / "src/worldcalib/evaluation.py").is_file():
             raise FileNotFoundError(
-                f"WorldCalib memory evaluator is missing under {root}"
+                f"vendored memory evaluator is missing under {root}"
             )
         examples = self._ensure_dataset_loaded()
         task_to_cluster = self._task_to_cluster(examples)
@@ -533,7 +547,7 @@ not benchmark records."""
             return cached
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        with worldcalib_import(self.config.worldcalib_root):
+        with worldcalib_import(_vendored_worldcalib_root()):
             from worldcalib.dynamic import load_candidate_scaffold  # type: ignore
             from worldcalib.scaffolds.base import ScaffoldConfig  # type: ignore
 
@@ -558,7 +572,7 @@ not benchmark records."""
                     "scaffold_name": "memgpt_source",
                     "source_project_path": str(source.resolve()),
                 },
-                project_root=self.config.worldcalib_root,
+                project_root=_vendored_worldcalib_root(),
             )
             config = ScaffoldConfig(
                 top_k=self.config.memory_top_k,
@@ -618,7 +632,7 @@ not benchmark records."""
         message = proc.stdout
         if proc.returncode == 0:
             try:
-                with worldcalib_import(self.config.worldcalib_root):
+                with worldcalib_import(_vendored_worldcalib_root()):
                     from worldcalib.dynamic import load_candidate_scaffold  # type: ignore
 
                     load_candidate_scaffold(
@@ -626,7 +640,7 @@ not benchmark records."""
                             "scaffold_name": "memgpt_source",
                             "source_project_path": str(source.resolve()),
                         },
-                        project_root=self.config.worldcalib_root,
+                        project_root=_vendored_worldcalib_root(),
                     )
             except Exception as exc:  # import failures are smoke failures
                 message += f"\n{type(exc).__name__}: {exc}\n"
@@ -675,8 +689,7 @@ not benchmark records."""
             filename = "locomo10.json"
             subdir = "locomo"
         candidates = (
-            self.config.worldcalib_root / "data" / subdir / filename,
-            self.config.worldcalib_root.parent / "Optimizer1" / "data" / subdir / filename,
+            Path("/data/home/yuhan/Optimizer1/data") / subdir / filename,
         )
         for candidate in candidates:
             if candidate.is_file():
@@ -690,7 +703,7 @@ not benchmark records."""
     def _load_examples(self) -> list[Any]:
         if self._data_path is None:
             raise RuntimeError("memory data path has not been resolved")
-        with worldcalib_import(self.config.worldcalib_root):
+        with worldcalib_import(_vendored_worldcalib_root()):
             if self._is_longmemeval:
                 from worldcalib.memory.longmemeval import (  # type: ignore
                     load_longmemeval_examples,
@@ -713,7 +726,7 @@ not benchmark records."""
             return seed_root
         if seed_root.exists():
             shutil.rmtree(seed_root)
-        source_root = self.config.worldcalib_root / "src/worldcalib"
+        source_root = _vendored_worldcalib_root() / "src/worldcalib"
         package_root.mkdir(parents=True, exist_ok=True)
         (package_root / "__init__.py").write_text(
             _MINIMAL_PACKAGE_INIT, encoding="utf-8"
@@ -758,7 +771,7 @@ not benchmark records."""
     def _evaluation_cache_fingerprint(
         self, *, source_hash: str, pool: PoolSliceRef
     ) -> tuple[str, dict[str, Any]]:
-        root = self.config.worldcalib_root / "src/worldcalib"
+        root = _vendored_worldcalib_root() / "src/worldcalib"
         harness_files = [
             root / "evaluation.py",
             root / "dynamic.py",

@@ -11,7 +11,8 @@ protocol:
 
 benchmark:
   name: longmemeval
-  worldcalib_root: /data/home/yuhan/WorldCalib
+  # Self-contained: memory evaluation substrate vendored in-repo.
+  env_file: /data/home/yuhan/WorldCalib/.env
   data_path: /data/home/yuhan/Optimizer1/data/longmemeval/longmemeval_s_cleaned.json
   dataset_variant: s
   # LongMemEval questions are independent clusters. This pilot uses a fixed

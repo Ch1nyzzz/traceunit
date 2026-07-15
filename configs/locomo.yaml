@@ -11,7 +11,9 @@ protocol:
 
 benchmark:
   name: locomo
-  worldcalib_root: /data/home/yuhan/WorldCalib
+  # Self-contained: the memory evaluation substrate is vendored in-repo
+  # (vendor/worldcalib_memory). env_file only supplies the solver key.
+  env_file: /data/home/yuhan/WorldCalib/.env
   data_path: /data/home/yuhan/Optimizer1/data/locomo/locomo10.json
   # Split by full dialogue/sample first, then take a balanced 80-question
   # search subset. No dialogue appears in both the search and final pools.
