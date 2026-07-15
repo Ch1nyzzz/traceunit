@@ -1,0 +1,81 @@
+# HLE source-domain run (SEAGym method A). The source pool is HLE's Math +
+# Physics categories; CS/AI + Engineering are held out entirely for the OOD
+# transfer run (see configs/hle_ood.yaml). The source pool is split into a
+# search set (harness-improvement evidence) and a frozen held-out test set.
+loop:
+  run_dir: ../runs/hle_source_v1
+  run_id: hle_source_v1
+  iterations: 10
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+  max_inner_retries: 3
+  max_instances_per_capability: 8
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: hle
+  env_file: /data/home/yuhan/WorldCalib/.env
+  hle_dataset_name: cais/hle
+  hle_dataset_split: test
+  # Source domain = Math + Physics (SEAGym's in-distribution categories).
+  hle_categories: "Math, Physics"
+  hle_text_only: true
+  # Per-question split: Mathematics alone is ~70% of the Math+Physics pool, so a
+  # whole-cluster split would badly unbalance search vs held-out. HLE questions
+  # are independent, so per-question carries no leakage.
+  hle_split_by: question
+  hle_max_output_tokens: 4096
+  # Source pool (Math+Physics, text-only) is ~1178 questions; the split fraction
+  # halves it, then the limits cap what is actually run. Search sees 80/iter;
+  # the held-out test set is a generous 150.
+  search_fraction: 0.50
+  search_limit: 80
+  final_limit: 150
+  benchmark_seed: 1729
+  # Frozen solver.
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  timeout_s: 300
+  # Sealed LLM judge (same provider so one key suffices).
+  use_llm_judge: true
+  judge_model: deepseek-v4-flash
+  judge_base_url: https://api.deepseek.com/v1
+  judge_api_key_env: DEEPSEEK_API_KEY
+  judge_timeout_s: 300
+  repeats: 1
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+  regression_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: false
+
+decision:
+  min_search_delta: 0.0
+  max_battery_regression: 0.0
+  # One flipped question on an 80-question search pool is 0.0125; keep the noise
+  # band just above a ~two-question swing.
+  noninferiority_margin: 0.05

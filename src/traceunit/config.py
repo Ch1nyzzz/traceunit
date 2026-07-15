@@ -91,6 +91,12 @@ class BenchmarkConfig:
     hle_categories: tuple[str, ...] = ()
     hle_text_only: bool = True
     hle_max_output_tokens: int = 4096
+    # How the source pool is divided into search vs held-out. "cluster" assigns
+    # each subject cluster wholesale (legacy); "question" assigns each question
+    # independently, so a single dominant subject (e.g. Mathematics is ~70% of
+    # the Math+Physics source pool) cannot land wholesale on one side. HLE
+    # questions are mutually independent, so per-question carries no leakage.
+    hle_split_by: str = "cluster"
     # AppWorld: external evaluation venv (pins pydantic v1 / SQLAlchemy 1.4, so it
     # lives outside the main environment). Configurable so the adapter no longer
     # hardcodes a WorldCalib path.
@@ -328,6 +334,7 @@ def load_config(path: Path) -> ProjectConfig:
         hle_max_output_tokens=max(
             1, int(benchmark_raw.get("hle_max_output_tokens", 4096))
         ),
+        hle_split_by=str(benchmark_raw.get("hle_split_by", "cluster")),
         appworld_venv_root=_path(base, benchmark_raw.get("appworld_venv_root")),
     )
     if benchmark.name not in {
@@ -344,6 +351,8 @@ def load_config(path: Path) -> ProjectConfig:
         )
     if not 0 < benchmark.search_fraction < 1:
         raise ValueError("benchmark.search_fraction must be between 0 and 1")
+    if benchmark.name == "hle" and benchmark.hle_split_by not in {"cluster", "question"}:
+        raise ValueError('benchmark.hle_split_by must be "cluster" or "question"')
     if env_file.is_file():
         secrets = dotenv_values(env_file)
         keys = [benchmark.api_key_env]

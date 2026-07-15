@@ -76,6 +76,7 @@ class HLEAdapter(BenchmarkAdapter):
             seed=self.config.benchmark_seed,
             search_fraction=self.config.search_fraction,
             cluster_key=_cluster_key,
+            split_by=self.config.hle_split_by,
         )
         search_rows = _seeded_order(search_rows, seed=self.config.benchmark_seed, ns="search")
         final_rows = _seeded_order(final_rows, seed=self.config.benchmark_seed, ns="final")
@@ -523,17 +524,23 @@ def _cluster_key(row: Mapping[str, Any]) -> str:
     return str(row.get("category") or row.get("raw_subject") or "unknown")
 
 
-def _split_rows(rows, *, seed, search_fraction, cluster_key):
+def _split_rows(rows, *, seed, search_fraction, cluster_key, split_by="cluster"):
     if not 0 < search_fraction < 1:
         raise ValueError("search_fraction must be between 0 and 1")
+    if split_by not in ("cluster", "question"):
+        raise ValueError(f"unknown split_by: {split_by!r}")
     search: list[dict[str, Any]] = []
     final: list[dict[str, Any]] = []
     for row in rows:
-        cluster = cluster_key(row)
+        # "cluster" keeps whole subjects together (legacy, avoids cross-cluster
+        # leakage where that matters); "question" assigns each question
+        # independently so one dominant subject cannot unbalance the split.
+        if split_by == "question":
+            token = f"{seed}:question:{row['id']}"
+        else:
+            token = f"{seed}:{cluster_key(row)}"
         value = (
-            int.from_bytes(
-                hashlib.sha256(f"{seed}:{cluster}".encode()).digest()[:8], "big"
-            )
+            int.from_bytes(hashlib.sha256(token.encode()).digest()[:8], "big")
             / 2**64
         )
         (search if value < search_fraction else final).append(row)
