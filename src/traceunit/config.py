@@ -91,6 +91,10 @@ class BenchmarkConfig:
     hle_categories: tuple[str, ...] = ()
     hle_text_only: bool = True
     hle_max_output_tokens: int = 4096
+    # AppWorld: external evaluation venv (pins pydantic v1 / SQLAlchemy 1.4, so it
+    # lives outside the main environment). Configurable so the adapter no longer
+    # hardcodes a WorldCalib path.
+    appworld_venv_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -324,6 +328,7 @@ def load_config(path: Path) -> ProjectConfig:
         hle_max_output_tokens=max(
             1, int(benchmark_raw.get("hle_max_output_tokens", 4096))
         ),
+        appworld_venv_root=_path(base, benchmark_raw.get("appworld_venv_root")),
     )
     if benchmark.name not in {
         "swebench_verified",

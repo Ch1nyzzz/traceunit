@@ -16,9 +16,12 @@ protocol:
 
 benchmark:
   name: appworld
-  worldcalib_root: /data/home/yuhan/WorldCalib
-  baseline_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
-  split_manifest_path: /data/home/yuhan/WorldCalib/data/appworld/split_challenge.json
+  # Self-contained: the editable seed agent is vendored in-repo
+  # (scaffolds/appworld_baseline) and the split manifest is packaged. env_file
+  # supplies the solver key; appworld_venv_root points at the external AppWorld
+  # eval venv (pydantic v1 / SQLAlchemy 1.4) -- relocate it anywhere you like.
+  env_file: /data/home/yuhan/WorldCalib/.env
+  appworld_venv_root: /data/home/yuhan/WorldCalib/.venv-appworld
   search_split: train
   heldout_split: test
   search_limit: 45

@@ -11,9 +11,9 @@ protocol:
 
 benchmark:
   name: appworld
-  worldcalib_root: /data/home/yuhan/WorldCalib
-  baseline_source_path: /data/home/yuhan/WorldCalib/src/worldcalib/agentic/backends/appworld
-  split_manifest_path: /data/home/yuhan/WorldCalib/data/appworld/split_challenge.json
+  # Self-contained: vendored seed agent + packaged split manifest.
+  env_file: /data/home/yuhan/WorldCalib/.env
+  appworld_venv_root: /data/home/yuhan/WorldCalib/.venv-appworld
   search_split: train
   heldout_split: test
   search_limit: 45

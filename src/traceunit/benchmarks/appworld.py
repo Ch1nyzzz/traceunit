@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import traceunit
 from traceunit.agent_probe import run_declarative_probe
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
@@ -32,6 +33,26 @@ from traceunit.models import BenchmarkPlan, PoolSliceRef
 
 
 _ADAPTER_VERSION = 3
+
+
+def _packaged_appworld_baseline() -> Path:
+    """Vendored worldcalib-free AppWorld seed agent shipped with TraceUnit."""
+
+    return (
+        Path(traceunit.__file__).parent / "scaffolds" / "appworld_baseline"
+    ).resolve()
+
+
+def _packaged_split_manifest() -> Path:
+    """Vendored default AppWorld scenario-disjoint split manifest."""
+
+    return (
+        Path(traceunit.__file__).parent
+        / "benchmarks"
+        / "data"
+        / "appworld"
+        / "split_challenge.json"
+    ).resolve()
 
 
 class AppWorldAdapter(BenchmarkAdapter):
@@ -55,9 +76,12 @@ class AppWorldAdapter(BenchmarkAdapter):
         )
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
-        root = self.config.worldcalib_root
-        if not (root / ".venv-appworld/bin/python").exists():
-            raise FileNotFoundError(f"AppWorld evaluation venv is missing under {root}")
+        venv_root = self._venv_root()
+        if not (venv_root / "bin/python").exists():
+            raise FileNotFoundError(
+                f"AppWorld evaluation venv is missing: {venv_root} "
+                "(set benchmark.appworld_venv_root)"
+            )
         pool_dir = work_dir / "benchmark_data" / "appworld"
         frozen_plan = pool_dir / "plan.json"
         if frozen_plan.is_file():
@@ -84,13 +108,8 @@ class AppWorldAdapter(BenchmarkAdapter):
             search = _load_task_ids(configured["search"])
             final = _load_task_ids(configured["final"])
         else:
-            default_challenge = root / "data/appworld/split_challenge.json"
-            default_normal = root / "data/appworld/split.json"
             source_manifest = (
-                self.config.split_manifest_path
-                or (
-                    default_challenge if default_challenge.is_file() else default_normal
-                )
+                self.config.split_manifest_path or _packaged_split_manifest()
             ).resolve()
             if not source_manifest.is_file():
                 raise FileNotFoundError(
@@ -140,10 +159,17 @@ class AppWorldAdapter(BenchmarkAdapter):
         if inspected.returncode != 0:
             raise RuntimeError("AppWorld sandbox image is not cached: python:3.12-slim")
 
+    def _venv_root(self) -> Path:
+        """AppWorld evaluation venv root (external, configurable resource)."""
+
+        return (
+            self.config.appworld_venv_root
+            or self.config.worldcalib_root / ".venv-appworld"
+        ).resolve()
+
     def baseline_source(self) -> Path:
         return (
-            self.config.baseline_source_path
-            or self.config.worldcalib_root / "src/worldcalib/agentic/backends/appworld"
+            self.config.baseline_source_path or _packaged_appworld_baseline()
         ).resolve()
 
     def context(self) -> str:
@@ -258,8 +284,8 @@ sealed process scores the persisted environment state after candidate execution 
     ) -> str:
         worker = Path(__file__).with_name("appworld_worker.py")
         appworld_init = (
-            self.config.worldcalib_root
-            / ".venv-appworld/lib/python3.12/site-packages/appworld/__init__.py"
+            self._venv_root()
+            / "lib/python3.12/site-packages/appworld/__init__.py"
         )
         payload = {
             "adapter_version": _ADAPTER_VERSION,
@@ -337,7 +363,7 @@ sealed process scores the persisted environment state after candidate execution 
             shutil.rmtree(task_out)
         task_out.mkdir(parents=True, exist_ok=True)
         worker = Path(__file__).with_name("appworld_worker.py").resolve()
-        python = self.config.worldcalib_root / ".venv-appworld/bin/python"
+        python = self._venv_root() / "bin/python"
         real_root = Path(
             os.environ.get("APPWORLD_ROOT", "/data/home/yuhan/appworld_home")
         ).resolve()
