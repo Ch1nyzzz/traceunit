@@ -11,12 +11,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
+import traceunit
 from traceunit.agent_probe import run_declarative_probe
 from traceunit.benchmarks.base import BenchmarkAdapter
 from traceunit.benchmarks.common import (
     load_cached_evaluation,
     normalize_worldcalib_result,
-    worldcalib_import,
 )
 from traceunit.benchmarks.pools import (
     freeze_benchmark_plan,
@@ -30,7 +30,25 @@ from traceunit.io import sha256_file, sha256_tree, write_json
 from traceunit.models import BenchmarkEvaluation, BenchmarkPlan, PoolSliceRef
 
 
-ADAPTER_CACHE_VERSION = 8
+ADAPTER_CACHE_VERSION = 9
+
+
+def _repo_root() -> Path:
+    """Repository root that holds scripts/run_miniswe_swebench_single.py."""
+
+    return Path(__file__).resolve().parents[3]
+
+
+def _packaged_miniswe_baseline() -> Path:
+    """Vendored editable mini-SWE-agent baseline shipped with TraceUnit."""
+
+    return (
+        Path(traceunit.__file__).parent / "scaffolds" / "mini_swe_agent_baseline"
+    ).resolve()
+
+
+def _miniswe_entry_script() -> Path:
+    return _repo_root() / "scripts" / "run_miniswe_swebench_single.py"
 _SAFE_TRACE_METRIC_KEYS = {
     "repo",
     "base_commit",
@@ -66,10 +84,9 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
         )
 
     def prepare(self, work_dir: Path) -> BenchmarkPlan:
-        root = self.config.worldcalib_root
-        if not (root / "src/worldcalib/coding/swebench.py").is_file():
+        if not _miniswe_entry_script().is_file():
             raise FileNotFoundError(
-                f"WorldCalib SWE-bench runner is missing under {root}"
+                f"mini-SWE-agent entry script is missing: {_miniswe_entry_script()}"
             )
         if not self.baseline_source().is_dir():
             raise FileNotFoundError(
@@ -165,8 +182,7 @@ class SwebenchVerifiedAdapter(BenchmarkAdapter):
 
     def baseline_source(self) -> Path:
         return (
-            self.config.baseline_source_path
-            or self.config.worldcalib_root / "references/vendor/mini-swe-agent"
+            self.config.baseline_source_path or _packaged_miniswe_baseline()
         ).resolve()
 
     def context(self) -> str:
@@ -208,35 +224,34 @@ official SWE-bench harness."""
         command = self.config.agent_command or self._default_agent_command()
         attempt_id = f"{candidate_id}-{cache_fingerprint[:16]}"
         eval_command = self._default_eval_command(attempt_id=attempt_id)
-        with worldcalib_import(self.config.worldcalib_root):
-            from worldcalib.coding.swebench import (  # type: ignore
-                DEFAULT_MINI_SWE_AGENT_NAME,
-                MiniSweAgentSourceRunner,
-                load_swebench_instances,
-            )
+        from traceunit.benchmarks.swebench_runner import (
+            DEFAULT_MINI_SWE_AGENT_NAME,
+            MiniSweAgentSourceRunner,
+            load_swebench_instances,
+        )
 
-            instances = load_swebench_instances(pool_path, split=pool.slice_id, limit=0)
-            runner = MiniSweAgentSourceRunner(
-                instances=instances,
-                out_dir=out_dir,
-                timeout_s=self.config.timeout_s,
-                max_eval_workers=self.config.concurrency,
-                dry_run=self.config.dry_run,
-                force=self.config.force,
-                project_root=self.config.worldcalib_root,
-            )
-            candidate = {
-                "source_project_path": str(source.resolve()),
-                "source_sha256": source_hash,
-                "evaluation_fingerprint": cache_fingerprint,
-                "command": command,
-                "eval_command": eval_command,
-            }
-            result = runner.evaluate_candidate(
-                candidate=candidate,
-                candidate_id=candidate_id,
-                agent_name=DEFAULT_MINI_SWE_AGENT_NAME,
-            )
+        instances = load_swebench_instances(pool_path, split=pool.slice_id, limit=0)
+        runner = MiniSweAgentSourceRunner(
+            instances=instances,
+            out_dir=out_dir,
+            timeout_s=self.config.timeout_s,
+            max_eval_workers=self.config.concurrency,
+            dry_run=self.config.dry_run,
+            force=self.config.force,
+            project_root=_repo_root(),
+        )
+        candidate = {
+            "source_project_path": str(source.resolve()),
+            "source_sha256": source_hash,
+            "evaluation_fingerprint": cache_fingerprint,
+            "command": command,
+            "eval_command": eval_command,
+        }
+        result = runner.evaluate_candidate(
+            candidate=candidate,
+            candidate_id=candidate_id,
+            agent_name=DEFAULT_MINI_SWE_AGENT_NAME,
+        )
         evaluation = normalize_worldcalib_result(
             result_path=Path(result.result_path),
             benchmark=self.name,
@@ -290,7 +305,7 @@ official SWE-bench harness."""
         return [message for token, message in banned.items() if token in added]
 
     def _default_agent_command(self) -> str:
-        script = self.config.worldcalib_root / "scripts/run_miniswe_swebench_single.py"
+        script = _miniswe_entry_script()
         return (
             f"python {script} run --source-path {{source_path}} "
             "--instance-path {instance_path} --patch-path {patch_path} "
@@ -349,8 +364,8 @@ def _evaluation_cache_fingerprint(
     pool: PoolSliceRef,
     config: BenchmarkConfig,
 ) -> tuple[str, dict[str, Any]]:
-    worldcalib_runner = config.worldcalib_root / "src/worldcalib/coding/swebench.py"
-    mini_entry = config.worldcalib_root / "scripts/run_miniswe_swebench_single.py"
+    runner_module = Path(__file__).with_name("swebench_runner.py")
+    mini_entry = _miniswe_entry_script()
     payload: dict[str, Any] = {
         "adapter_cache_version": ADAPTER_CACHE_VERSION,
         "swebench_harness_spec": SWEBENCH_HARNESS_SPEC,
@@ -365,8 +380,8 @@ def _evaluation_cache_fingerprint(
         "dataset_name": config.dataset_name,
         "dataset_split": config.dataset_split,
         "agent_command": config.agent_command,
-        "worldcalib_runner_sha256": (
-            sha256_file(worldcalib_runner) if worldcalib_runner.is_file() else "missing"
+        "swebench_runner_sha256": (
+            sha256_file(runner_module) if runner_module.is_file() else "missing"
         ),
         "miniswe_entry_sha256": (
             sha256_file(mini_entry) if mini_entry.is_file() else "missing"

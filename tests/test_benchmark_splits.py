@@ -139,13 +139,6 @@ def test_swebench_prepare_freezes_repo_disjoint_plan_and_strips_private_fields(
 def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
     tmp_path: Path,
 ) -> None:
-    worldcalib = tmp_path / "worldcalib"
-    runner = worldcalib / "src/worldcalib/coding/swebench.py"
-    entry = worldcalib / "scripts/run_miniswe_swebench_single.py"
-    runner.parent.mkdir(parents=True)
-    entry.parent.mkdir(parents=True)
-    runner.write_text("runner-v1", encoding="utf-8")
-    entry.write_text("entry-v1", encoding="utf-8")
     pool = tmp_path / "pool.json"
     pool.write_text('[{"instance_id":"a"}]', encoding="utf-8")
     pool_ref = PoolSliceRef(
@@ -157,7 +150,6 @@ def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
     )
     config = BenchmarkConfig(
         name="swebench_verified",
-        worldcalib_root=worldcalib,
         model="model-a",
     )
 
@@ -182,7 +174,6 @@ def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
         pool=pool_ref,
         config=BenchmarkConfig(
             name="swebench_verified",
-            worldcalib_root=worldcalib,
             model="model-b",
         ),
     )
@@ -198,19 +189,25 @@ def test_swebench_cache_fingerprint_binds_pool_slice_config_and_harness(
         ),
         config=config,
     )
-    pool.write_text('[{"instance_id":"a"}]', encoding="utf-8")
-    runner.write_text("runner-v2", encoding="utf-8")
-    different_harness, _ = _evaluation_cache_fingerprint(
+    different_config, _ = _evaluation_cache_fingerprint(
         source_hash="source-a",
         pool=pool_ref,
-        config=config,
+        config=BenchmarkConfig(
+            name="swebench_verified",
+            model="model-a",
+            timeout_s=123,
+        ),
     )
 
     assert payload["source_sha256"] == "source-a"
     assert payload["pool"]["manifest_sha256"] == pool_ref.manifest_sha256
+    # The in-repo harness (runner module + entry script) is bound into the
+    # fingerprint, so a harness change invalidates the cache.
+    assert payload["swebench_runner_sha256"] != "missing"
+    assert payload["miniswe_entry_sha256"] != "missing"
     assert (
         len(
-            {first, different_slice, different_model, different_pool, different_harness}
+            {first, different_slice, different_model, different_pool, different_config}
         )
         == 5
     )

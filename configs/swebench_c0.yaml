@@ -11,8 +11,8 @@ protocol:
 
 benchmark:
   name: swebench_verified
-  worldcalib_root: /data/home/yuhan/WorldCalib
-  baseline_source_path: /data/home/yuhan/WorldCalib/references/vendor/mini-swe-agent
+  # Self-contained: editable mini-SWE-agent baseline is vendored in-repo.
+  env_file: /data/home/yuhan/WorldCalib/.env
   search_data_path: /data/home/yuhan/Optimizer1/data/swebench_verified_all500_test.json
   search_limit: 50
   final_limit: 137
