@@ -1,0 +1,68 @@
+loop:
+  run_dir: ../runs/terminalbench_traceunit_v1
+  run_id: terminalbench_traceunit_v1
+  iterations: 10
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+  max_inner_retries: 3
+  max_instances_per_capability: 8
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: terminalbench
+  # Terminal-Bench 2.0 is self-contained here: it runs through the installed
+  # Harbor library, not WorldCalib. env_file only supplies the solver API key.
+  env_file: /data/home/yuhan/WorldCalib/.env
+  # Editable scaffold defaults to the packaged vendored Terminus copy; override
+  # with scaffold_source_path to point at a different agent source tree.
+  harbor_dataset_name: terminal-bench
+  harbor_dataset_version: "2.0"
+  parser_name: json
+  # Terminal-Bench 2.0 has 89 tasks; keep the first real run small (long-horizon
+  # tasks cost ~1.5-2.3M tokens each). Raise the limits once plumbing is proven.
+  search_limit: 12
+  final_limit: 24
+  benchmark_seed: 1729
+  search_fraction: 0.60
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  concurrency: 8
+  timeout_s: 1800
+  harbor_max_turns: 0
+  repeats: 1
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+  regression_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: false
+
+decision:
+  min_search_delta: 0.0
+  max_battery_regression: 0.0
+  # One flipped task on a 12-task search pool is ~0.083; keep the noise band
+  # just above a single-task swing so real movement must clear two tasks.
+  noninferiority_margin: 0.09

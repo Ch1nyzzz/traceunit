@@ -75,6 +75,22 @@ class BenchmarkConfig:
     judge_base_url: str = "https://api.together.xyz/v1"
     judge_api_key_env: str = "TOGETHER_API_KEY"
     judge_timeout_s: int = 300
+    # Harbor-hosted benchmarks (Terminal-Bench 2.0). The editable scaffold is a
+    # Harbor agent loaded by import path; the runner is driven out-of-process by
+    # ``harbor_worker`` so candidate sources never collide in the module cache.
+    harbor_dataset_name: str = "terminal-bench"
+    harbor_dataset_version: str = "2.0"
+    harbor_dataset_path: Path | None = None
+    harbor_jobs_dir: Path | None = None
+    harbor_max_turns: int = 0
+    parser_name: str = "json"
+    scaffold_source_path: Path | None = None
+    # Native HLE runner (Humanity's Last Exam text-only QA).
+    hle_dataset_name: str = "cais/hle"
+    hle_dataset_split: str = "test"
+    hle_categories: tuple[str, ...] = ()
+    hle_text_only: bool = True
+    hle_max_output_tokens: int = 4096
 
 
 @dataclass(frozen=True)
@@ -248,6 +264,8 @@ def load_config(path: Path) -> ProjectConfig:
     benchmark_name = str(benchmark_raw["name"]).lower()
     if benchmark_name == "lme":
         benchmark_name = "longmemeval"
+    if benchmark_name == "tb2":
+        benchmark_name = "terminalbench"
     benchmark = BenchmarkConfig(
         name=benchmark_name,
         worldcalib_root=worldcalib_root,
@@ -290,17 +308,41 @@ def load_config(path: Path) -> ProjectConfig:
         ),
         judge_api_key_env=str(benchmark_raw.get("judge_api_key_env", "TOGETHER_API_KEY")),
         judge_timeout_s=max(1, int(benchmark_raw.get("judge_timeout_s", 300))),
+        harbor_dataset_name=str(
+            benchmark_raw.get("harbor_dataset_name", "terminal-bench")
+        ),
+        harbor_dataset_version=str(benchmark_raw.get("harbor_dataset_version", "2.0")),
+        harbor_dataset_path=_path(base, benchmark_raw.get("harbor_dataset_path")),
+        harbor_jobs_dir=_path(base, benchmark_raw.get("harbor_jobs_dir")),
+        harbor_max_turns=max(0, int(benchmark_raw.get("harbor_max_turns", 0))),
+        parser_name=str(benchmark_raw.get("parser_name", "json")),
+        scaffold_source_path=_path(base, benchmark_raw.get("scaffold_source_path")),
+        hle_dataset_name=str(benchmark_raw.get("hle_dataset_name", "cais/hle")),
+        hle_dataset_split=str(benchmark_raw.get("hle_dataset_split", "test")),
+        hle_categories=_strings(benchmark_raw.get("hle_categories")),
+        hle_text_only=bool(benchmark_raw.get("hle_text_only", True)),
+        hle_max_output_tokens=max(
+            1, int(benchmark_raw.get("hle_max_output_tokens", 4096))
+        ),
     )
-    if benchmark.name not in {"swebench_verified", "appworld", "locomo", "longmemeval"}:
+    if benchmark.name not in {
+        "swebench_verified",
+        "appworld",
+        "locomo",
+        "longmemeval",
+        "terminalbench",
+        "hle",
+    }:
         raise ValueError(
-            "benchmark.name must be swebench_verified, appworld, locomo, or longmemeval"
+            "benchmark.name must be swebench_verified, appworld, locomo, "
+            "longmemeval, terminalbench, or hle"
         )
     if not 0 < benchmark.search_fraction < 1:
         raise ValueError("benchmark.search_fraction must be between 0 and 1")
     if env_file.is_file():
         secrets = dotenv_values(env_file)
         keys = [benchmark.api_key_env]
-        if benchmark.name == "longmemeval" and benchmark.use_llm_judge:
+        if benchmark.name in {"longmemeval", "hle"} and benchmark.use_llm_judge:
             keys.append(benchmark.judge_api_key_env)
         for key in dict.fromkeys(keys):
             if key not in os.environ:
