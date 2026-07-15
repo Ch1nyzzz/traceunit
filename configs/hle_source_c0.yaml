@@ -1,0 +1,75 @@
+# HLE source-domain ABLATION run: c0_score_only.
+#
+# Identical to configs/hle_source.yaml in every benchmark field (same seed,
+# categories, split_by, fractions, limits) so it prepares the SAME search /
+# held-out pools -- the only difference is protocol.condition. c0_score_only
+# disables all of TraceUnit's machinery (generated test packets, capability
+# battery gate, archive, online UT memory) and edits the scaffold by search
+# score alone. Compared against configs/hle_source.yaml (c3_full), the paired
+# held-out delta isolates how much that machinery contributes.
+loop:
+  run_dir: ../runs/hle_source_c0_v1
+  run_id: hle_source_c0_v1
+  iterations: 10
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+  max_inner_retries: 3
+  max_instances_per_capability: 8
+
+protocol:
+  condition: c0_score_only
+
+benchmark:
+  name: hle
+  env_file: /data/home/yuhan/WorldCalib/.env
+  hle_dataset_name: cais/hle
+  hle_dataset_split: test
+  hle_categories: "Math, Physics"
+  hle_text_only: true
+  hle_split_by: question
+  hle_max_output_tokens: 4096
+  search_fraction: 0.50
+  search_limit: 80
+  final_limit: 150
+  benchmark_seed: 1729
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  timeout_s: 300
+  use_llm_judge: true
+  judge_model: deepseek-v4-flash
+  judge_base_url: https://api.deepseek.com/v1
+  judge_api_key_env: DEEPSEEK_API_KEY
+  judge_timeout_s: 300
+  repeats: 1
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+  regression_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: false
+
+decision:
+  min_search_delta: 0.0
+  max_battery_regression: 0.0
+  noninferiority_margin: 0.05
