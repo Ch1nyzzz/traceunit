@@ -1,0 +1,47 @@
+# HLE out-of-distribution transfer pool (SEAGym method A). CS/AI + Engineering
+# are never trained on; this config only materializes them as a frozen OOD
+# evaluation pool. The `ood-evaluate` subcommand takes the harness produced by
+# a completed source-domain run (configs/hle_source.yaml) and scores both the
+# baseline and the optimized harness on this pool -- the transfer measurement.
+#
+#   python -m traceunit.cli ood-evaluate \
+#     --config configs/hle_ood.yaml --source-run runs/hle_source_v1
+#
+# No agents/optimization run here: only prepare + evaluate are used.
+loop:
+  run_dir: ../runs/hle_ood_v1
+  run_id: hle_ood_v1
+  iterations: 1
+  resume: true
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: hle
+  env_file: /data/home/yuhan/WorldCalib/.env
+  hle_dataset_name: cais/hle
+  hle_dataset_split: test
+  # OOD domain = Computer Science/AI + Engineering (SEAGym's transfer target).
+  hle_categories: "Computer Science/AI, Engineering"
+  hle_text_only: true
+  hle_split_by: question
+  hle_max_output_tokens: 4096
+  # CS/AI+Eng text-only is ~288 questions. Only the held-out (final) pool is
+  # used for OOD scoring; the search slice is a required non-empty placeholder.
+  search_fraction: 0.15
+  search_limit: 8
+  final_limit: 80
+  benchmark_seed: 1729
+  # Frozen solver (identical to the source run so transfer is measured cleanly).
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  timeout_s: 300
+  use_llm_judge: true
+  judge_model: deepseek-v4-flash
+  judge_base_url: https://api.deepseek.com/v1
+  judge_api_key_env: DEEPSEEK_API_KEY
+  judge_timeout_s: 300
+  repeats: 1
+  dry_run: false

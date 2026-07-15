@@ -11,6 +11,7 @@ from traceunit.config import ProjectConfig, load_config
 from traceunit.final_evaluation import FinalEvaluationRunner
 from traceunit.io import read_json, write_json
 from traceunit.ontology import freeze_ontology
+from traceunit.ood_evaluation import OODEvaluationRunner
 from traceunit.optimizer import OptimizationLoop
 from traceunit.store import RunStore
 from traceunit.tests_runtime import load_test_packet, verify_frozen_packet
@@ -31,6 +32,15 @@ def _parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="do not run the sealed final evaluation after search completes",
             )
+    ood = sub.add_parser("ood-evaluate")
+    ood.add_argument("--config", type=Path, required=True)
+    ood.add_argument(
+        "--source-run",
+        type=Path,
+        required=True,
+        help="completed source-domain run directory whose optimized harness is "
+        "scored on this config's OOD pool",
+    )
     inspect = sub.add_parser("inspect")
     inspect.add_argument("--run-dir", type=Path, required=True)
     packet = sub.add_parser("validate-packet")
@@ -66,6 +76,23 @@ def _final_evaluate(config: ProjectConfig) -> dict:
         summary["final_evaluation"] = "opened"
         write_json(summary_path, summary)
     return report
+
+
+def _ood_evaluate(config: ProjectConfig, source_run: Path) -> dict:
+    """Score a completed source run's harness on this config's OOD pool."""
+
+    adapter = build_benchmark(config.benchmark)
+    config.loop.run_dir.mkdir(parents=True, exist_ok=True)
+    freeze_ontology(config.loop.run_dir / "protocol" / "l0_ontology.json")
+    plan = adapter.prepare(config.loop.run_dir)
+    adapter.preflight()
+    runner = OODEvaluationRunner(
+        ood_store=RunStore(config.loop.run_dir),
+        benchmark=adapter,
+        ood_plan=plan,
+        source_run_dir=source_run.resolve(),
+    )
+    return runner.run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -111,6 +138,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "final-evaluate":
         report = _final_evaluate(config)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0
+    if args.command == "ood-evaluate":
+        report = _ood_evaluate(config, args.source_run)
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0
     summary = OptimizationLoop(config).run()
