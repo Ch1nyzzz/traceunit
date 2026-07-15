@@ -1,0 +1,76 @@
+loop:
+  run_dir: ../runs/hle_traceunit_v1
+  run_id: hle_traceunit_v1
+  iterations: 10
+  resume: true
+  max_failure_traces: 16
+  max_attempts_per_packet: 4
+  max_inner_retries: 3
+  max_instances_per_capability: 8
+
+protocol:
+  condition: c3_full
+
+benchmark:
+  name: hle
+  # HLE runs natively in-process (no WorldCalib, no Harbor). env_file only
+  # supplies the solver/judge API key.
+  env_file: /data/home/yuhan/WorldCalib/.env
+  hle_dataset_name: cais/hle
+  hle_dataset_split: test
+  # cais/hle is gated on HuggingFace: request access on the dataset page and log
+  # in (huggingface-cli login) once. Alternatively point data_path at a local
+  # host-only HLE-shaped .jsonl/.json to run fully offline (data_path wins).
+  # data_path: /path/to/hle_test.jsonl
+  hle_text_only: true
+  # Optional: restrict to specific categories/subjects, e.g. "Math, Physics".
+  hle_categories: ""
+  hle_max_output_tokens: 4096
+  search_limit: 40
+  final_limit: 60
+  benchmark_seed: 1729
+  search_fraction: 0.60
+  # Frozen solver.
+  model: deepseek-v4-flash
+  base_url: https://api.deepseek.com/v1
+  api_key_env: DEEPSEEK_API_KEY
+  timeout_s: 300
+  # Sealed LLM judge (self-hosted on the same provider so only one key is needed).
+  use_llm_judge: true
+  judge_model: deepseek-v4-flash
+  judge_base_url: https://api.deepseek.com/v1
+  judge_api_key_env: DEEPSEEK_API_KEY
+  judge_timeout_s: 300
+  repeats: 1
+  dry_run: false
+
+agents:
+  test_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+  search:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 3600
+  regression_author:
+    provider: codex
+    isolation: docker
+    container_image: traceunit-agent:latest
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    timeout_s: 1800
+    enabled: false
+
+decision:
+  min_search_delta: 0.0
+  max_battery_regression: 0.0
+  # One flipped question on a 40-question search pool is 0.025; keep the noise
+  # band just above a two-question swing.
+  noninferiority_margin: 0.06
